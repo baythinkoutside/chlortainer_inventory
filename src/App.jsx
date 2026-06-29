@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabase.js";
 
 // ─── ChlorTainer Brand Tokens ─────────────────────────────────────────────────
 const C = {
@@ -11,128 +12,8 @@ const C = {
   warnBg:    "#FFF8E6", warnText:  "#8A5A00", warnBdr:  "#F5C842",
 };
 
-// ─── Supabase client loader ───────────────────────────────────────────────────
-// Dynamically loads the Supabase JS client from CDN so no bundler is needed.
-
-let _supabase = null;
-
-async function getSupabase(url, key) {
-  if (_supabase) return _supabase;
-  if (!window.supabase) {
-    await new Promise((res, rej) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js";
-      s.onload = res; s.onerror = rej;
-      document.head.appendChild(s);
-    });
-  }
-  _supabase = window.supabase.createClient(url, key);
-  return _supabase;
-}
-
-// ─── Connection config (persisted in localStorage) ───────────────────────────
-
-const STORAGE_KEY = "chlortainer_supabase_config";
-
-function loadConfig() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || null; } catch { return null; }
-}
-function saveConfig(cfg) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-}
-function clearConfig() {
-  localStorage.removeItem(STORAGE_KEY);
-  _supabase = null;
-}
-
-// ─── SQL setup script (shown to user) ────────────────────────────────────────
-
-const SETUP_SQL = `-- Run this in your Supabase SQL Editor (Database → SQL Editor → New Query)
-
--- Suppliers
-create table if not exists suppliers (
-  id text primary key,
-  name text not null,
-  contact text,
-  phone text,
-  created_at timestamptz default now()
-);
-
--- Parts
-create table if not exists parts (
-  id text primary key,
-  description text not null,
-  category text,
-  uom text default 'EA',
-  stock integer default 0,
-  min_stock integer default 0,
-  location text,
-  created_at timestamptz default now()
-);
-
--- Part ↔ Supplier links (many-to-many)
-create table if not exists part_suppliers (
-  id uuid primary key default gen_random_uuid(),
-  part_id text references parts(id) on delete cascade,
-  supplier_id text references suppliers(id) on delete cascade,
-  mfg_part_no text,
-  lead_days integer default 0,
-  unit_cost numeric(10,2) default 0,
-  unique(part_id, supplier_id)
-);
-
--- License plates
-create table if not exists license_plates (
-  id text primary key,
-  type text default 'Outbound',
-  destination text,
-  status text default 'Pending',
-  created_at date default current_date,
-  items jsonb default '[]'
-);
-
--- Enable Realtime on all tables
-alter publication supabase_realtime add table suppliers;
-alter publication supabase_realtime add table parts;
-alter publication supabase_realtime add table part_suppliers;
-alter publication supabase_realtime add table license_plates;
-
--- Seed suppliers
-insert into suppliers (id, name, contact, phone) values
-  ('SUP-001','Aldrich Chemical Co.','orders@aldrichchem.com','800-325-3010'),
-  ('SUP-002','Parker Hannifin','industrial@parker.com','216-896-3000'),
-  ('SUP-003','Swagelok','info@swagelok.com','440-349-5934'),
-  ('SUP-004','McMaster-Carr','orders@mcmaster.com','630-833-0300')
-on conflict do nothing;
-
--- Seed parts
-insert into parts (id, description, category, uom, stock, min_stock, location) values
-  ('CT-BC-0001','HDPE Containment Body 55gal','Containment','EA',24,10,'A-01-03'),
-  ('CT-BC-0002','PTFE Gasket 2-inch','Seals & Gaskets','EA',8,25,'B-03-01'),
-  ('CT-BC-0003','316 SS Ball Valve 1/2"','Valves','EA',42,15,'C-02-04'),
-  ('CT-BC-0004','Chlorine Sensor Probe','Instrumentation','EA',5,5,'D-01-01'),
-  ('CT-BC-0005','HDPE Lid Assembly','Containment','EA',19,8,'A-01-04'),
-  ('CT-BC-0006','Vent Filter HEPA 4"','Filtration','EA',3,12,'B-04-02')
-on conflict do nothing;
-
--- Seed part-supplier links
-insert into part_suppliers (part_id, supplier_id, mfg_part_no, lead_days, unit_cost) values
-  ('CT-BC-0001','SUP-002','HB-55-HDPE',7,142.00),
-  ('CT-BC-0001','SUP-004','MC-HDPE-55G',5,138.50),
-  ('CT-BC-0002','SUP-003','SS-PTFE-2',3,4.75),
-  ('CT-BC-0002','SUP-004','MC-GKT-PTFE',2,5.10),
-  ('CT-BC-0003','SUP-003','SW-BV-SS-050',4,67.80),
-  ('CT-BC-0004','SUP-001','AC-CLR-PRB-01',14,312.00),
-  ('CT-BC-0005','SUP-002','HB-LID-ASM',7,58.25),
-  ('CT-BC-0005','SUP-004','MC-LID-HDPE',4,55.00),
-  ('CT-BC-0006','SUP-004','MC-VNT-HEPA4',2,18.40)
-on conflict do nothing;
-
--- Seed license plate
-insert into license_plates (id, type, destination, status, created_at, items) values
-  ('LP-20240628-A1B2','Outbound','Parker Hannifin','Shipped','2024-06-28',
-   '[{"partId":"CT-BC-0001","qty":10},{"partId":"CT-BC-0005","qty":10}]')
-on conflict do nothing;`;
+// Supabase client is imported from ./supabase.js which reads VITE_SUPABASE_URL
+// and VITE_SUPABASE_ANON_KEY from Netlify environment variables.
 
 // ─── Shared UI primitives ─────────────────────────────────────────────────────
 
@@ -207,127 +88,21 @@ function Spinner({text="Loading…"}){
   </div>;
 }
 
-// ─── Supabase Setup Screen ────────────────────────────────────────────────────
+// ─── Supabase data hook ───────────────────────────────────────────────────────
 
-function SetupScreen({ onConnected }) {
-  const [url,  setUrl]  = useState("");
-  const [key,  setKey]  = useState("");
-  const [step, setStep] = useState("credentials"); // credentials | sql | testing
-  const [err,  setErr]  = useState("");
-  const [copied, setCopied] = useState(false);
-
-  async function testConnection() {
-    setErr(""); setStep("testing");
-    try {
-      const sb = await getSupabase(url.trim(), key.trim());
-      const { error } = await sb.from("parts").select("id").limit(1);
-      if (error) throw new Error(error.message);
-      saveConfig({ url: url.trim(), key: key.trim() });
-      onConnected();
-    } catch (e) {
-      setErr(e.message || "Connection failed. Check your URL and key.");
-      setStep("credentials");
-    }
-  }
-
-  function copySql() {
-    navigator.clipboard.writeText(SETUP_SQL);
-    setCopied(true); setTimeout(() => setCopied(false), 2000);
-  }
-
-  return (
-    <div style={{minHeight:"100vh",background:C.offWhite,display:"flex",flexDirection:"column"}}>
-      {/* Header */}
-      <div style={{background:C.navy,borderBottom:`4px solid ${C.amber}`,padding:"16px 24px",display:"flex",alignItems:"center",gap:10}}>
-        <div style={{background:C.amber,width:5,height:32,borderRadius:2}}/>
-        <div>
-          <div style={{fontSize:18,fontWeight:900,color:C.white}}>ChlorTainer</div>
-          <div style={{fontSize:9,fontWeight:700,color:C.amber,letterSpacing:2.5,textTransform:"uppercase"}}>Inventory System — Database Setup</div>
-        </div>
-      </div>
-
-      <div style={{maxWidth:640,margin:"32px auto",padding:"0 20px",width:"100%"}}>
-        {/* Progress steps */}
-        <div style={{display:"flex",gap:0,marginBottom:32}}>
-          {[["1","Create Supabase Project"],["2","Run SQL Script"],["3","Enter Credentials"]].map(([n,l],i)=>(
-            <div key={n} style={{display:"flex",alignItems:"center",flex:1}}>
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                <div style={{width:32,height:32,borderRadius:"50%",background:i<=1?C.amber:C.border,color:i<=1?C.navy:C.textLight,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:800}}>{n}</div>
-                <div style={{fontSize:10,color:C.textMid,textAlign:"center",maxWidth:80,lineHeight:1.3}}>{l}</div>
-              </div>
-              {i<2&&<div style={{flex:1,height:2,background:C.border,margin:"0 4px",marginBottom:20}}/>}
-            </div>
-          ))}
-        </div>
-
-        {/* Step 1 — Create project */}
-        <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:10,padding:24,marginBottom:16}}>
-          <SectionTitle>Step 1 — Create a Supabase Project</SectionTitle>
-          <ol style={{margin:0,paddingLeft:20,display:"grid",gap:8}}>
-            {["Go to supabase.com and sign in (or create a free account).",
-              "Click New Project — choose your organization.",
-              "Give it a name like chlortainer-inventory and pick a region closest to you.",
-              "Set a database password and click Create New Project.",
-              "Wait ~2 minutes for provisioning to complete."
-            ].map((t,i)=><li key={i} style={{fontSize:13,color:C.textMid,lineHeight:1.5}}>{t}</li>)}
-          </ol>
-          <a href="https://supabase.com" target="_blank" rel="noreferrer"
-            style={{display:"inline-flex",alignItems:"center",gap:6,marginTop:14,background:C.navy,color:"#fff",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,textDecoration:"none"}}>
-            Open Supabase ↗
-          </a>
-        </div>
-
-        {/* Step 2 — SQL */}
-        <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:10,padding:24,marginBottom:16}}>
-          <SectionTitle>Step 2 — Run the SQL Setup Script</SectionTitle>
-          <p style={{fontSize:13,color:C.textMid,margin:"0 0 12px"}}>In your Supabase project go to <strong>Database → SQL Editor → New Query</strong>, paste the script below, and click Run.</p>
-          <div style={{position:"relative"}}>
-            <pre style={{background:"#0D1520",color:"#A8C8E8",borderRadius:8,padding:16,fontSize:11,overflowX:"auto",margin:0,lineHeight:1.6,maxHeight:220,overflowY:"auto"}}>{SETUP_SQL}</pre>
-            <button onClick={copySql} style={{position:"absolute",top:10,right:10,background:copied?C.greenText:C.amber,color:copied?"#fff":C.navy,border:"none",borderRadius:5,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-              {copied?"✅ Copied!":"Copy SQL"}
-            </button>
-          </div>
-          <p style={{fontSize:12,color:C.textLight,margin:"10px 0 0"}}>This creates all tables, enables real-time sync, and seeds your initial data.</p>
-        </div>
-
-        {/* Step 3 — Credentials */}
-        <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:10,padding:24,marginBottom:16}}>
-          <SectionTitle>Step 3 — Enter Your Credentials</SectionTitle>
-          <p style={{fontSize:13,color:C.textMid,margin:"0 0 16px"}}>In Supabase go to <strong>Project Settings → API</strong>. Copy the <em>Project URL</em> and <em>anon public</em> key.</p>
-          <div style={{display:"grid",gap:14}}>
-            <Input label="Project URL" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://xxxxxxxxxxxx.supabase.co"/>
-            <Input label="Anon Public Key" value={key} onChange={e=>setKey(e.target.value)} placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9…" style={{fontFamily:"monospace",fontSize:12}}/>
-          </div>
-          {err && <div style={{marginTop:12,background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ {err}</div>}
-          <div style={{marginTop:16,display:"flex",gap:10}}>
-            <Btn onClick={testConnection} disabled={!url||!key||step==="testing"} style={{flex:1,justifyContent:"center"}}>
-              {step==="testing"?"Connecting…":"Connect to Supabase"}
-            </Btn>
-          </div>
-          <p style={{fontSize:11,color:C.textLight,margin:"12px 0 0"}}>Your credentials are stored only in this browser's localStorage — never sent anywhere except directly to your Supabase project.</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Supabase data hooks ──────────────────────────────────────────────────────
-
-function useSupabaseData(config) {
+function useSupabaseData() {
   const [parts,     setParts]     = useState([]);
   const [suppliers, setSuppliers] = useState([]);
   const [lps,       setLps]       = useState([]);
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
-  const sbRef = useRef(null);
 
-  // Fetch all data and stitch part_suppliers into parts
-  const fetchAll = async (sb) => {
+  const fetchAll = async () => {
     const [{ data: sups }, { data: rawParts }, { data: links }, { data: plates }] = await Promise.all([
-      sb.from("suppliers").select("*").order("name"),
-      sb.from("parts").select("*").order("id"),
-      sb.from("part_suppliers").select("*"),
-      sb.from("license_plates").select("*").order("created_at", { ascending: false }),
+      supabase.from("suppliers").select("*").order("name"),
+      supabase.from("parts").select("*").order("id"),
+      supabase.from("part_suppliers").select("*"),
+      supabase.from("license_plates").select("*").order("created_at", { ascending: false }),
     ]);
     const stitched = (rawParts||[]).map(p => ({
       ...p, minStock: p.min_stock,
@@ -342,73 +117,64 @@ function useSupabaseData(config) {
   };
 
   useEffect(() => {
-    if (!config) return;
     let subs = [];
     (async () => {
       try {
-        const sb = await getSupabase(config.url, config.key);
-        sbRef.current = sb;
-        await fetchAll(sb);
+        await fetchAll();
         setLoading(false);
-
-        // Real-time subscriptions — re-fetch on any change
-        const refresh = () => fetchAll(sb);
+        const refresh = () => fetchAll();
         subs = [
-          sb.channel("parts-ch").on("postgres_changes",{event:"*",schema:"public",table:"parts"},refresh).subscribe(),
-          sb.channel("sups-ch").on("postgres_changes",{event:"*",schema:"public",table:"suppliers"},refresh).subscribe(),
-          sb.channel("links-ch").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
-          sb.channel("lps-ch").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
+          supabase.channel("parts-ch").on("postgres_changes",{event:"*",schema:"public",table:"parts"},refresh).subscribe(),
+          supabase.channel("sups-ch").on("postgres_changes",{event:"*",schema:"public",table:"suppliers"},refresh).subscribe(),
+          supabase.channel("links-ch").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
+          supabase.channel("lps-ch").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
         ];
-      } catch(e) {
-        setError(e.message); setLoading(false);
-      }
+      } catch(e) { setError(e.message); setLoading(false); }
     })();
     return () => { subs.forEach(s => s.unsubscribe()); };
-  }, [config]);
+  }, []);
 
   // ── Write helpers ──
 
-  const sb = () => sbRef.current;
-
   async function addPart(form) {
     const id = `CT-BC-${String(parts.length+1).padStart(4,"0")}`;
-    await sb().from("parts").insert({ id, description:form.description, category:form.category,
+    await supabase.from("parts").insert({ id, description:form.description, category:form.category,
       uom:form.uom, stock:+form.stock||0, min_stock:+form.minStock||0, location:form.location });
   }
 
   async function updateStock(partId, newStock) {
-    await sb().from("parts").update({ stock: newStock }).eq("id", partId);
+    await supabase.from("parts").update({ stock: newStock }).eq("id", partId);
   }
 
   async function addSupplier(form) {
     const id = `SUP-${String(suppliers.length+1).padStart(3,"0")}`;
-    await sb().from("suppliers").insert({ id, name:form.name, contact:form.contact, phone:form.phone });
+    await supabase.from("suppliers").insert({ id, name:form.name, contact:form.contact, phone:form.phone });
   }
 
   async function linkSupplier(partId, form) {
-    await sb().from("part_suppliers").upsert({
+    await supabase.from("part_suppliers").upsert({
       part_id:partId, supplier_id:form.supplierId, mfg_part_no:form.mfgPartNo,
       lead_days:+form.leadDays||0, unit_cost:+form.unitCost||0
     });
   }
 
   async function unlinkSupplier(partId, supplierId) {
-    await sb().from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);
+    await supabase.from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);
   }
 
   async function createLP(form, items) {
     const today = new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix = Math.random().toString(36).slice(2,6).toUpperCase();
     const id = `LP-${today}-${suffix}`;
-    await sb().from("license_plates").insert({
+    await supabase.from("license_plates").insert({
       id, type:form.type, destination:form.destination,
-      status:form.status, created_at:new Date().toISOString().slice(0,10), items
+      status:form.status, created_at:new Date().toISOString().slice(0,10), items,
     });
     return id;
   }
 
   async function updateLPStatus(lpId, status) {
-    await sb().from("license_plates").update({ status }).eq("id", lpId);
+    await supabase.from("license_plates").update({ status }).eq("id", lpId);
   }
 
   return { parts, suppliers, lps, loading, error,
@@ -1112,11 +878,9 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
 // ─── App Shell ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [config, setConfig] = useState(loadConfig);
-  const [tab,    setTab]    = useState("scan");
+  const [tab, setTab] = useState("scan");
   const [showDisconnect, setShowDisconnect] = useState(false);
-
-  const { parts, suppliers, lps, loading, error, actions } = useSupabaseData(config);
+  const { parts, suppliers, lps, loading, error, actions } = useSupabaseData();
 
   const tabs=[
     {id:"scan",      label:"Scan",          icon:"📷"},
@@ -1127,8 +891,6 @@ export default function App() {
   ];
 
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
-
-  if (!config) return <SetupScreen onConnected={()=>setConfig(loadConfig())}/>;
 
   return (
     <div style={{minHeight:"100vh",background:C.offWhite}}>
@@ -1146,7 +908,6 @@ export default function App() {
               {loading&&<span style={{fontSize:11,color:C.textLight}}>Syncing…</span>}
               {!loading&&<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.greenText,background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:12,padding:"3px 10px",fontWeight:700}}>🟢 Live</div>}
               {alerts>0&&<div style={{background:C.amber,color:C.navy,borderRadius:20,padding:"4px 12px",fontSize:12,fontWeight:800}}>⚠ {alerts} Low Stock</div>}
-              <button onClick={()=>setShowDisconnect(true)} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:C.textLight,padding:"4px 8px"}}>⚙ DB</button>
             </div>
           </div>
           <div style={{display:"flex",gap:0,overflowX:"auto"}}>
@@ -1167,7 +928,6 @@ export default function App() {
           <span style={{color:C.amber,fontWeight:700}}>ChlorTainer</span><span>›</span>
           <span>{tabs.find(t=>t.id===tab)?.label}</span>
         </div>
-
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ Database error: {error}</div>}
         {loading ? <Spinner text="Loading from Supabase…"/>
           : tab==="scan"      ? <ScanTab      parts={parts} suppliers={suppliers} lps={lps} actions={actions}/>
@@ -1177,20 +937,6 @@ export default function App() {
           : tab==="lp"        ? <LicensePlatesTab lps={lps} parts={parts} actions={actions}/>
           : null}
       </div>
-
-      {showDisconnect&&<Modal title="Database Connection" onClose={()=>setShowDisconnect(false)}>
-        <div style={{display:"grid",gap:14}}>
-          <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:8,padding:"12px 16px"}}>
-            <div style={{fontSize:13,fontWeight:700,color:C.greenText,marginBottom:4}}>🟢 Connected to Supabase</div>
-            <div style={{fontFamily:"monospace",fontSize:11,color:C.textMid,wordBreak:"break-all"}}>{config?.url}</div>
-          </div>
-          <p style={{fontSize:13,color:C.textMid,margin:0}}>To switch databases or re-enter credentials, disconnect below. Your Supabase data will not be affected.</p>
-          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-            <Btn variant="outline" onClick={()=>setShowDisconnect(false)}>Cancel</Btn>
-            <Btn variant="danger" onClick={()=>{clearConfig();setConfig(null);setShowDisconnect(false);}}>Disconnect</Btn>
-          </div>
-        </div>
-      </Modal>}
 
       <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 20px",textAlign:"center",background:C.white}}>
         <span style={{fontSize:11,color:C.textLight}}>© 2026 TGO Technologies, Inc. — ChlorTainer Inventory System · Keeping Operators Safe. Protecting Our Communities.</span>
