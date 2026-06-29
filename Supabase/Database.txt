@@ -1,0 +1,26 @@
+db PWD = Cwj2GXpLqQGHBx7f
+
+
+Project URL
+https://mwvxbxbxwwmekdfwmfao.supabase.co
+
+Perishable key
+
+sb_publishable_8wndwasoYtyUIijeqi97ow_Xq0T7jbh
+
+Direct connection string
+
+postgresql://postgres:[YOUR-PASSWORD]@db.mwvxbxbxwwmekdfwmfao.supabase.co:5432/postgres
+
+
+CLI setup commands
+
+supabase login
+supabase init
+supabase link --project-ref mwvxbxbxwwmekdfwmfao
+
+
+
+
+
+
