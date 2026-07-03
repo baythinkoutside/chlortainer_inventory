@@ -402,7 +402,6 @@ function ManualEntry({ onSubmit }) {
 
 function ScanTab({ parts, suppliers, lps, actions }) {
   const [mode,      setMode]      = useState(null);
-  const [scanning,  setScanning]  = useState(false);
   const [result,    setResult]    = useState(null);
   const [notFound,  setNotFound]  = useState("");
   const [receiveQty,setReceiveQty]= useState(1);
@@ -419,8 +418,8 @@ function ScanTab({ parts, suppliers, lps, actions }) {
     const t = code.trim().toUpperCase();
     if(mode==="lookup"||mode==="receive"){
       const part = parts.find(p => p.id.toUpperCase() === t);
-      if(part){ setResult({type:"part",data:part}); setScanning(false); }
-      else { setNotFound(t); setScanning(false); }
+      if(part){ setResult({type:"part",data:part}); }
+      else { setNotFound(t); }
     }
     if(mode==="ship"){
       const part = parts.find(p => p.id.toUpperCase() === t);
@@ -428,7 +427,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
       if(part){
         if(!shipItems.find(i=>i.partId===part.id)){ setShipItems(prev=>[...prev,{partId:part.id,qty:1}]); showToast(`Added ${part.id} to shipment`); }
         else showToast(`${part.id} already in list`);
-      } else if(lp){ setResult({type:"lp",data:lp}); setScanning(false); }
+      } else if(lp){ setResult({type:"lp",data:lp}); }
       else setNotFound(t);
     }
   }
@@ -450,7 +449,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
     setSaving(false); setShipItems([]); setShipDest(""); setResult(null); setMode(null);
   }
 
-  function reset(){setMode(null);setResult(null);setNotFound("");setScanning(false);setShipItems([]);setShipDest("");}
+  function reset(){setMode(null);setResult(null);setNotFound("");setShipItems([]);setShipDest("");}
 
   const modes=[
     {id:"lookup", icon:"🔍",label:"Look Up Part",   desc:"Scan a SKU to view part details & stock level"},
@@ -522,14 +521,14 @@ function ScanTab({ parts, suppliers, lps, actions }) {
       </div>}
 
       {/* LOOKUP */}
-      {mode==="lookup"&&!result&&(!scanning
-        ? <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            <Btn variant="amber" style={{width:"100%",justifyContent:"center",padding:"14px",fontSize:15}} onClick={()=>{setNotFound("");setScanning(true);}}>📷 Take Photo to Scan</Btn>
-            <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
-            <ManualEntry onSubmit={handleScan}/>
-            {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
-          </div>
-        : <CameraScanner onScan={handleScan} onClose={()=>setScanning(false)} hint="Point at any CT-BC-#### barcode label"/>
+      {mode==="lookup"&&!result&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {/* Camera scanner — always shown in lookup mode */}
+          <CameraScanner onScan={handleScan} onClose={()=>reset()} hint="Point at any CT-BC-#### barcode label"/>
+          <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
+          <ManualEntry onSubmit={handleScan}/>
+          {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
+        </div>
       )}
       {mode==="lookup"&&result?.type==="part"&&(()=>{
         const live=parts.find(x=>x.id===result.data.id)||result.data;
@@ -554,14 +553,14 @@ function ScanTab({ parts, suppliers, lps, actions }) {
       })()}
 
       {/* RECEIVE */}
-      {mode==="receive"&&!result&&(!scanning
-        ? <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            <Btn variant="amber" style={{width:"100%",justifyContent:"center",padding:"14px",fontSize:15}} onClick={()=>{setNotFound("");setScanning(true);}}>📷 Take Photo to Scan</Btn>
-            <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
-            <ManualEntry onSubmit={handleScan}/>
-            {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
-          </div>
-        : <CameraScanner onScan={handleScan} onClose={()=>setScanning(false)} hint="Point at the part's barcode to receive stock"/>
+      {mode==="receive"&&!result&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <CameraScanner onScan={handleScan} onClose={()=>reset()} hint="Point at the part's barcode to receive stock"/>
+          <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
+          <ManualEntry onSubmit={handleScan}/>
+          {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
+        </div>
+      )}
       )}
       {mode==="receive"&&result?.type==="part"&&(()=>{
         const live=parts.find(x=>x.id===result.data.id)||result.data;
@@ -610,10 +609,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
             </div>;
           })}
         </div>
-        {scanning
-          ? <CameraScanner onScan={handleScan} onClose={()=>setScanning(false)} hint="Scan each part — keep scanning to add multiple items"/>
-          : <Btn variant="amber" style={{width:"100%",justifyContent:"center",padding:"12px"}} onClick={()=>setScanning(true)}>📷 {shipItems.length===0?"Take Photo to Scan":"Scan Another Part"}</Btn>
-        }
+        <CameraScanner onScan={handleScan} onClose={()=>reset()} hint="Scan each part — keep scanning to add multiple items"/>
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
         {shipItems.length>0&&<div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,display:"grid",gap:12}}>
           <SectionTitle>Shipment Details</SectionTitle>
