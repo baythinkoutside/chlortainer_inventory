@@ -361,6 +361,88 @@ function ManualEntry({ onSubmit }) {
   );
 }
 
+// ─── Lookup Result ────────────────────────────────────────────────────────────
+
+function LookupResult({ result, parts, suppliers, onClear }) {
+  const live = parts.find(x => x.id === result.data.id) || result.data;
+  const sc = live.stock === 0 ? "red" : live.stock < live.minStock ? "amber" : "green";
+  return (
+    <div style={{display:"grid",gap:14}}>
+      <div style={{display:"flex",justifyContent:"center",background:C.offWhite,borderRadius:8,padding:16}}>
+        <BarcodeDisplay code={live.id} size="lg"/>
+      </div>
+      <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:16}}>
+        <div style={{fontWeight:800,fontSize:16,color:C.navy,marginBottom:8}}>{live.description}</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          {[["Category",<Badge color="navy">{live.category}</Badge>],
+            ["Location",<code style={{fontSize:13}}>{live.location}</code>],
+            ["On Hand",<span style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</span>],
+            ["Status",<Badge color={sc}>{live.stock===0?"Out of Stock":live.stock<live.minStock?"Low Stock":"In Stock"}</Badge>]
+          ].map(([l,v])=>(
+            <div key={l}>
+              <div style={{fontSize:10,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
+              {v}
+            </div>
+          ))}
+        </div>
+      </div>
+      {live.suppliers?.map((s,i) => {
+        const sup = suppliers.find(x => x.id === s.supplierId);
+        return (
+          <div key={i} style={{border:`1px solid ${C.border}`,borderRadius:8,padding:12}}>
+            <div style={{fontWeight:700,color:C.navy}}>{sup?.name}</div>
+            <div style={{fontFamily:"monospace",fontSize:12,color:C.textMid,marginTop:2}}>
+              {s.mfgPartNo} · ${s.unitCost?.toFixed(2)}/{live.uom} · {s.leadDays}d lead
+            </div>
+          </div>
+        );
+      })}
+      <Btn variant="outline" onClick={onClear} style={{justifyContent:"center"}}>Scan Another</Btn>
+    </div>
+  );
+}
+
+// ─── Receive Result ───────────────────────────────────────────────────────────
+
+function ReceiveResult({ result, parts, receiveQty, setReceiveQty, saving, onBack, onConfirm }) {
+  const live = parts.find(x => x.id === result.data.id) || result.data;
+  return (
+    <div style={{display:"grid",gap:14}}>
+      <div style={{background:C.white,border:`2px solid ${C.amber}`,borderRadius:8,padding:16}}>
+        <div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>Receiving into</div>
+        <div style={{fontFamily:"monospace",fontSize:13,color:C.amber,fontWeight:700}}>{live.id}</div>
+        <div style={{fontWeight:700,fontSize:15,color:C.navy,marginTop:2}}>{live.description}</div>
+        <div style={{display:"flex",gap:16,marginTop:8}}>
+          <div>
+            <div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Current Stock</div>
+            <div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</div>
+          </div>
+          <div>
+            <div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Location</div>
+            <div style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location}</div>
+          </div>
+        </div>
+      </div>
+      <Field label="Quantity Received">
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={()=>setReceiveQty(q=>Math.max(1,+q-1))} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+          <input type="number" min="1" value={receiveQty} onChange={e=>setReceiveQty(e.target.value)} style={{...inputStyle,flex:1,textAlign:"center",fontSize:22,fontFamily:"monospace",fontWeight:700}}/>
+          <button onClick={()=>setReceiveQty(q=>+q+1)} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+        </div>
+      </Field>
+      <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.greenText}}>
+        New stock total: <strong>{live.stock+(+receiveQty)} {live.uom}</strong>
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={onBack}>← Back</Btn>
+        <Btn style={{flex:1,justifyContent:"center"}} disabled={saving} onClick={onConfirm}>
+          {saving ? "Saving…" : "✅ Confirm Receipt"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 // ─── Scan Tab ─────────────────────────────────────────────────────────────────
 
 function ScanTab({ parts, suppliers, lps, actions }) {
@@ -493,27 +575,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
           {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
         </div>
       )}
-      {mode==="lookup"&&result?.type==="part"&&(()=>{
-        const live=parts.find(x=>x.id===result.data.id)||result.data;
-        const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
-        return <div style={{display:"grid",gap:14}}>
-          <div style={{display:"flex",justifyContent:"center",background:C.offWhite,borderRadius:8,padding:16}}><BarcodeDisplay code={live.id} size="lg"/></div>
-          <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:16}}>
-            <div style={{fontWeight:800,fontSize:16,color:C.navy,marginBottom:8}}>{live.description}</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-              {[["Category",<Badge color="navy">{live.category}</Badge>],["Location",<code style={{fontSize:13}}>{live.location}</code>],
-                ["On Hand",<span style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</span>],
-                ["Status",<Badge color={sc}>{live.stock===0?"Out of Stock":live.stock<live.minStock?"Low Stock":"In Stock"}</Badge>]
-              ].map(([l,v])=><div key={l}><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>{v}</div>)}
-            </div>
-          </div>
-          {live.suppliers?.map((s,i)=>{const sup=suppliers.find(x=>x.id===s.supplierId);return <div key={i} style={{border:`1px solid ${C.border}`,borderRadius:8,padding:12}}>
-            <div style={{fontWeight:700,color:C.navy}}>{sup?.name}</div>
-            <div style={{fontFamily:"monospace",fontSize:12,color:C.textMid,marginTop:2}}>{s.mfgPartNo} · ${s.unitCost?.toFixed(2)}/{live.uom} · {s.leadDays}d lead</div>
-          </div>;})}
-          <Btn variant="outline" onClick={()=>setResult(null)} style={{justifyContent:"center"}}>Scan Another</Btn>
-        </div>;
-      })()}
+      {mode==="lookup"&&result?.type==="part"&&<LookupResult result={result} parts={parts} suppliers={suppliers} onClear={()=>setResult(null)}/>}
 
       {/* RECEIVE */}
       {mode==="receive"&&!result&&(
@@ -524,35 +586,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
           {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong>. Check the SKU and try again.</div>}
         </div>
       )}
-      )}
-      {mode==="receive"&&result?.type==="part"&&(()=>{
-        const live=parts.find(x=>x.id===result.data.id)||result.data;
-        return <div style={{display:"grid",gap:14}}>
-          <div style={{background:C.white,border:`2px solid ${C.amber}`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>Receiving into</div>
-            <div style={{fontFamily:"monospace",fontSize:13,color:C.amber,fontWeight:700}}>{live.id}</div>
-            <div style={{fontWeight:700,fontSize:15,color:C.navy,marginTop:2}}>{live.description}</div>
-            <div style={{display:"flex",gap:16,marginTop:8}}>
-              <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Current Stock</div><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</div></div>
-              <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Location</div><div style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location}</div></div>
-            </div>
-          </div>
-          <Field label="Quantity Received">
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <button onClick={()=>setReceiveQty(q=>Math.max(1,+q-1))} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
-              <input type="number" min="1" value={receiveQty} onChange={e=>setReceiveQty(e.target.value)} style={{...inputStyle,flex:1,textAlign:"center",fontSize:22,fontFamily:"monospace",fontWeight:700}}/>
-              <button onClick={()=>setReceiveQty(q=>+q+1)} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
-            </div>
-          </Field>
-          <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.greenText}}>
-            New stock total: <strong>{live.stock+(+receiveQty)} {live.uom}</strong>
-          </div>
-          <div style={{display:"flex",gap:10}}>
-            <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={()=>setResult(null)}>← Back</Btn>
-            <Btn style={{flex:1,justifyContent:"center"}} disabled={saving} onClick={applyReceive}>{saving?"Saving…":"✅ Confirm Receipt"}</Btn>
-          </div>
-        </div>;
-      })()}
+      {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
 
       {/* SHIP */}
       {mode==="ship"&&<div style={{display:"grid",gap:14}}>
