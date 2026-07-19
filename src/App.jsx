@@ -252,25 +252,30 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       async function tick() {
         if (cancelled) return;
 
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-          canvas.width  = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        try {
+          // iOS Safari: videoWidth can report 0 even when video is playing
+          // Use actual canvas size from stream track settings as fallback
+          const track = streamRef.current?.getVideoTracks()[0];
+          const settings = track?.getSettings() || {};
+          const w = video.videoWidth  || settings.width  || 1280;
+          const h = video.videoHeight || settings.height || 720;
+
+          canvas.width  = w;
+          canvas.height = h;
+          ctx.drawImage(video, 0, 0, w, h);
 
           frameRef.current += 1;
-          if (frameRef.current % 5 === 0) {
-            setFrameCount(frameRef.current);
-          }
+          if (frameRef.current % 3 === 0) setFrameCount(frameRef.current);
 
           let decoded = null;
 
-          // Strategy A: ZXing decodeFromCanvas (most direct, no image bounce)
+          // Strategy A: ZXing decodeFromCanvas
           try {
             const result = reader.decodeFromCanvas(canvas);
             if (result) decoded = result.getText().trim();
           } catch(_) {}
 
-          // Strategy B: Native BarcodeDetector (iOS 17+, Chrome Android)
+          // Strategy B: Native BarcodeDetector (iOS 17+)
           if (!decoded && "BarcodeDetector" in window) {
             try {
               const bd = new window.BarcodeDetector();
@@ -279,16 +284,12 @@ function CameraScanner({ onScan, onClose, hint="" }) {
             } catch(_) {}
           }
 
-          // Strategy C: ZXing via luminance source from ImageData
+          // Strategy C: ZXing luminance source
           if (!decoded) {
             try {
-              const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              const src = new window.ZXing.RGBLuminanceSource(
-                imgData.data, canvas.width, canvas.height
-              );
-              const bmp = new window.ZXing.BinaryBitmap(
-                new window.ZXing.HybridBinarizer(src)
-              );
+              const imgData = ctx.getImageData(0, 0, w, h);
+              const src = new window.ZXing.RGBLuminanceSource(imgData.data, w, h);
+              const bmp = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
               const result = reader.decode(bmp);
               if (result) decoded = result.getText().trim();
             } catch(_) {}
@@ -297,16 +298,15 @@ function CameraScanner({ onScan, onClose, hint="" }) {
           if (decoded && decoded !== lastRef.current) {
             lastRef.current = decoded;
             setLastScan(decoded);
-            setDecodeErr("");
             if (navigator.vibrate) navigator.vibrate(80);
             onScan(decoded);
           }
-        }
+        } catch(_) {}
 
         if (!cancelled) loopRef.current = setTimeout(tick, 250);
       }
 
-      loopRef.current = setTimeout(tick, 1000);
+      loopRef.current = setTimeout(tick, 500);
     }
 
     start();
