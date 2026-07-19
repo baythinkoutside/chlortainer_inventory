@@ -184,193 +184,156 @@ function useSupabaseData() {
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
 
 function CameraScanner({ onScan, onClose, hint="" }) {
-  const fileRef   = useRef(null);
+  const videoRef  = useRef(null);
   const canvasRef = useRef(null);
-  const [status,   setStatus]   = useState("ready");
+  const streamRef = useRef(null);
+  const loopRef   = useRef(null);
+  const lastRef   = useRef("");
+  const [status,   setStatus]   = useState("starting");
   const [errMsg,   setErrMsg]   = useState("");
   const [lastScan, setLastScan] = useState("");
-  const [debugText, setDebugText] = useState(""); // shows raw decoded value
 
-  async function decodeImage(blob) {
-    // Load ZXing first
-    if (!window.ZXing) {
-      await new Promise((res, rej) => {
-        const s = document.createElement("script");
-        s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";
-        s.onload = res; s.onerror = rej;
-        document.head.appendChild(s);
-      });
-    }
+  useEffect(() => {
+    let cancelled = false;
 
-    // Draw blob to canvas — this avoids the revoked-URL problem entirely
-    const bitmap = await createImageBitmap(blob);
-    const canvas = canvasRef.current;
-    canvas.width  = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close();
-
-    // Try BarcodeDetector (native iOS 17+ / Chrome Android)
-    if ("BarcodeDetector" in window) {
+    async function start() {
+      // 1. Request camera — iOS requires facingMode only, never deviceId
+      let stream;
       try {
-        const bd = new window.BarcodeDetector({ formats: ["code_128","code_39","qr_code","ean_13","ean_8","upc_a","upc_e","itf","codabar","data_matrix","aztec","pdf417"] });
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        // BarcodeDetector works on ImageBitmap, HTMLCanvasElement, or ImageData
-        const results = await bd.detect(canvas);
-        if (results.length > 0) {
-          setDebugText(`BarcodeDetector: "${results[0].rawValue}"`);
-          return results[0].rawValue;
-        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
       } catch(e) {
-        setDebugText(`BarcodeDetector failed: ${e.message}`);
+        if (!cancelled) {
+          setStatus("error");
+          setErrMsg(
+            e.name === "NotAllowedError"
+              ? "Camera access denied. Go to iPhone Settings → Safari → Camera → set to Allow, then reload."
+              : `Camera unavailable: ${e.message}`
+          );
+        }
+        return;
       }
-    }
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      streamRef.current = stream;
 
-    // ZXing fallback — decode from canvas data URL
-    // Must create a fresh image from canvas AFTER drawing to it
-    const dataUrl = canvas.toDataURL("image/png");
-    const img2 = new Image();
-    img2.src = dataUrl;
-    await new Promise((res, rej) => { img2.onload = res; img2.onerror = rej; });
+      // 2. Attach stream — srcObject must be set while video ref is mounted
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      await new Promise(res => { video.onloadedmetadata = () => video.play().then(res).catch(res); });
+      if (cancelled) return;
+      setStatus("scanning");
 
-    const reader = new window.ZXing.BrowserMultiFormatReader();
-    try {
-      const result = await reader.decodeFromImageElement(img2);
-      const text = result ? result.getText() : null;
-      setDebugText(`ZXing: "${text}"`);
-      return text;
-    } catch(e) {
-      setDebugText(`ZXing error: ${e.message || "not found"}`);
-      return null;
-    }
-  }
-
-  async function handleFileChange(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setStatus("scanning");
-    setErrMsg("");
-    setDebugText("");
-    try {
-      const text = await decodeImage(file);
-      if (text) {
-        // Trim whitespace — some decoders add trailing spaces or newlines
-        const cleaned = text.trim();
-        setLastScan(cleaned);
-        if (navigator.vibrate) navigator.vibrate(80);
-        setStatus("ready");
-        onScan(cleaned);
-      } else {
-        setStatus("error");
-        setErrMsg("No barcode detected. Move closer, ensure good lighting, and hold the camera steady.");
+      // 3. Load ZXing
+      if (!window.ZXing) {
+        await new Promise((res, rej) => {
+          const s = document.createElement("script");
+          s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
       }
-    } catch(err) {
-      setStatus("error");
-      setErrMsg(`Decode error: ${err.message}`);
-      setDebugText(`Exception: ${err.message}`);
+      if (cancelled) return;
+
+      const reader = new window.ZXing.BrowserMultiFormatReader();
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d");
+
+      // 4. Decode loop — sample a frame every 300ms
+      async function tick() {
+        if (cancelled) return;
+        try {
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            canvas.width  = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL("image/png");
+            const img = new Image();
+            img.src = dataUrl;
+            await new Promise(r => { img.onload = r; });
+            const result = await reader.decodeFromImageElement(img).catch(() => null);
+            if (result) {
+              const text = result.getText().trim();
+              if (text && text !== lastRef.current) {
+                lastRef.current = text;
+                setLastScan(text);
+                if (navigator.vibrate) navigator.vibrate(80);
+                onScan(text);
+              }
+            }
+          }
+        } catch(_) {}
+        if (!cancelled) loopRef.current = setTimeout(tick, 300);
+      }
+      loopRef.current = setTimeout(tick, 1000);
     }
-    e.target.value = "";
-  }
+
+    start();
+    return () => {
+      cancelled = true;
+      clearTimeout(loopRef.current);
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    };
+  }, []);
 
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {/* Hidden canvas for ZXing decoding */}
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
       <canvas ref={canvasRef} style={{display:"none"}}/>
+      <div style={{position:"relative",background:"#000",borderRadius:10,overflow:"hidden",aspectRatio:"4/3"}}>
+        <video ref={videoRef} playsInline muted autoPlay
+          style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
 
-      {/* Hidden file input — triggers iOS native camera */}
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        style={{display:"none"}}
-        onChange={handleFileChange}
-      />
-
-      {/* Main scan button */}
-      <button
-        onClick={() => { setStatus("ready"); setErrMsg(""); fileRef.current?.click(); }}
-        style={{
-          background: C.amber, color: C.navy, border: "none", borderRadius: 10,
-          padding: "24px 20px", fontSize: 16, fontWeight: 800, cursor: "pointer",
-          display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
-          width: "100%", transition: "opacity .15s",
-        }}>
-        <svg width="64" height="64" viewBox="0 0 90 160" fill="none">
-          <rect x="4" y="2" width="82" height="156" rx="14" fill={C.navy}/>
-          <rect x="10" y="18" width="70" height="124" rx="5" fill="#111D2B"/>
-          <rect x="30" y="6" width="30" height="8" rx="4" fill="#0D1520"/>
-          <rect x="33" y="134" width="24" height="3" rx="1.5" fill="#2C3E50"/>
-          <rect x="22" y="42" width="46" height="76" rx="4" fill="#0A1628"/>
-          <path d="M28 52 L28 48 L32 48" stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-          <path d="M58 48 L62 48 L62 52" stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-          <path d="M28 108 L28 112 L32 112" stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-          <path d="M58 112 L62 112 L62 108" stroke={C.amber} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-          <rect x="28" y="66" width="2" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="32" y="66" width="4" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="38" y="66" width="2" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="42" y="66" width="3" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="47" y="66" width="2" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="51" y="66" width="4" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="57" y="66" width="2" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-          <rect x="61" y="66" width="3" height="28" rx="1" fill={C.amber} opacity="0.8"/>
-        </svg>
-        {status === "scanning" ? "Decoding barcode…" : "📷 Tap to Open Camera"}
-        <span style={{fontSize:12,fontWeight:600,opacity:.8}}>
-          {status === "scanning" ? "Please wait…" : "Point at any ChlorTainer barcode and take a photo"}
-        </span>
-      </button>
-
-      {/* Status feedback */}
-      {status === "scanning" && (
-        <div style={{display:"flex",alignItems:"center",gap:10,background:C.offWhite,borderRadius:8,padding:"12px 16px"}}>
-          <div style={{width:20,height:20,border:`2.5px solid ${C.amber}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite",flexShrink:0}}/>
-          <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-          <span style={{fontSize:13,color:C.textMid}}>Reading barcode from photo…</span>
-        </div>
-      )}
-
-      {lastScan && status === "ready" && (
-        <div style={{background:C.greenBg,border:`1.5px solid ${C.greenBdr}`,borderRadius:8,padding:"12px 16px",display:"flex",alignItems:"center",gap:10}}>
-          <span style={{fontSize:20}}>✅</span>
-          <div>
-            <div style={{fontSize:11,color:C.greenText,fontWeight:700,textTransform:"uppercase",letterSpacing:.5}}>Last Scan</div>
-            <div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lastScan}</div>
+        {status==="scanning"&&<>
+          {[{t:16,l:16,bt:"top",bl:"left"},{t:16,r:16,bt:"top",bl:"right"},
+            {b:16,l:16,bt:"bottom",bl:"left"},{b:16,r:16,bt:"bottom",bl:"right"}].map((pos,i)=>(
+            <div key={i} style={{position:"absolute",...pos,width:28,height:28,
+              borderTop:pos.bt==="top"?`3px solid ${C.amber}`:"none",
+              borderBottom:pos.bt==="bottom"?`3px solid ${C.amber}`:"none",
+              borderLeft:pos.bl==="left"?`3px solid ${C.amber}`:"none",
+              borderRight:pos.bl==="right"?`3px solid ${C.amber}`:"none"}}/>
+          ))}
+          <div style={{position:"absolute",left:28,right:28,height:2,background:C.amber,opacity:.9,animation:"scanline 2s ease-in-out infinite"}}/>
+          <style>{`@keyframes scanline{0%,100%{top:20%}50%{top:80%}}`}</style>
+          <div style={{position:"absolute",top:8,left:0,right:0,textAlign:"center"}}>
+            <span style={{background:"rgba(28,43,58,.7)",color:C.amber,fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:10,letterSpacing:.5}}>SCANNING</span>
           </div>
-        </div>
-      )}
+        </>}
 
-      {status === "error" && (
-        <div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"12px 16px",fontSize:13,color:C.red}}>
-          ❌ {errMsg}
-        </div>
-      )}
+        {status==="starting"&&(
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,background:"rgba(0,0,0,.6)"}}>
+            <div style={{width:36,height:36,border:`3px solid ${C.amber}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            <span style={{color:"#fff",fontSize:13}}>Starting camera…</span>
+          </div>
+        )}
 
-      {debugText && (
-        <div style={{background:"#0D1520",borderRadius:8,padding:"10px 14px",fontSize:11,fontFamily:"monospace",color:"#A8C8E8",wordBreak:"break-all"}}>
-          🔍 Debug: {debugText}
-        </div>
-      )}
-        <div style={{background:C.amberLight,border:`1px solid ${C.amberBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.warnText,display:"flex",gap:8,alignItems:"flex-start"}}>
-          <span style={{flexShrink:0}}>💡</span><span>{hint}</span>
-        </div>
-      )}
+        {status==="error"&&(
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:20,background:"rgba(0,0,0,.85)"}}>
+            <span style={{fontSize:32}}>📵</span>
+            <span style={{color:"#fff",fontSize:12,textAlign:"center",lineHeight:1.5}}>{errMsg}</span>
+          </div>
+        )}
 
-      <div style={{background:C.offWhite,borderRadius:8,padding:"12px 16px",fontSize:12,color:C.textMid,lineHeight:1.6}}>
-        <strong style={{color:C.navy}}>How to scan:</strong><br/>
-        1. Tap the camera button above<br/>
-        2. iOS camera will open — point at the barcode<br/>
-        3. Tap the shutter button to take the photo<br/>
-        4. The barcode will be decoded automatically
+        {lastScan&&(
+          <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(28,43,58,.88)",padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:18}}>✅</span>
+            <span style={{color:"#fff",fontFamily:"monospace",fontSize:13,fontWeight:700}}>{lastScan}</span>
+          </div>
+        )}
       </div>
 
-      <div style={{display:"flex",justifyContent:"center"}}>
-        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
-      </div>
+      {hint&&(
+        <div style={{background:C.amberLight,border:`1px solid ${C.amberBdr}`,borderRadius:6,padding:"10px 14px",fontSize:12,color:C.warnText,display:"flex",gap:8,alignItems:"center"}}>
+          <span>💡</span><span>{hint}</span>
+        </div>
+      )}
+      <Btn variant="outline" onClick={onClose} style={{justifyContent:"center"}}>Close Camera</Btn>
     </div>
   );
 }
+
 
 // ─── Manual Entry Input ───────────────────────────────────────────────────────
 // Controlled input — avoids the DOM traversal bug in the old Go button
