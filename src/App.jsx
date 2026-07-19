@@ -248,65 +248,80 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       const canvas = canvasRef.current;
       const ctx    = canvas.getContext("2d");
 
-      // 4. Multi-strategy decode loop
+      // 4. Decode loop using requestAnimationFrame — iOS won't throttle this
+      let rafId = null;
+      let framesSinceLastDecode = 0;
+
       async function tick() {
         if (cancelled) return;
 
-        try {
-          // iOS Safari: videoWidth can report 0 even when video is playing
-          // Use actual canvas size from stream track settings as fallback
-          const track = streamRef.current?.getVideoTracks()[0];
-          const settings = track?.getSettings() || {};
-          const w = video.videoWidth  || settings.width  || 1280;
-          const h = video.videoHeight || settings.height || 720;
+        framesSinceLastDecode++;
 
-          canvas.width  = w;
-          canvas.height = h;
-          ctx.drawImage(video, 0, 0, w, h);
+        // Only attempt decode every 8 frames (~4x/sec at 30fps) to avoid blocking
+        if (framesSinceLastDecode >= 8) {
+          framesSinceLastDecode = 0;
 
-          frameRef.current += 1;
-          if (frameRef.current % 3 === 0) setFrameCount(frameRef.current);
-
-          let decoded = null;
-
-          // Strategy A: ZXing decodeFromCanvas
           try {
-            const result = reader.decodeFromCanvas(canvas);
-            if (result) decoded = result.getText().trim();
-          } catch(_) {}
+            const track = streamRef.current?.getVideoTracks()[0];
+            const settings = track?.getSettings() || {};
+            const w = video.videoWidth  || settings.width  || 1280;
+            const h = video.videoHeight || settings.height || 720;
 
-          // Strategy B: Native BarcodeDetector (iOS 17+)
-          if (!decoded && "BarcodeDetector" in window) {
-            try {
-              const bd = new window.BarcodeDetector();
-              const results = await bd.detect(canvas);
-              if (results.length > 0) decoded = results[0].rawValue.trim();
-            } catch(_) {}
-          }
+            canvas.width  = w;
+            canvas.height = h;
+            ctx.drawImage(video, 0, 0, w, h);
 
-          // Strategy C: ZXing luminance source
-          if (!decoded) {
+            frameRef.current += 1;
+            setFrameCount(frameRef.current);
+
+            let decoded = null;
+
+            // Strategy A: ZXing decodeFromCanvas
             try {
-              const imgData = ctx.getImageData(0, 0, w, h);
-              const src = new window.ZXing.RGBLuminanceSource(imgData.data, w, h);
-              const bmp = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
-              const result = reader.decode(bmp);
+              const result = reader.decodeFromCanvas(canvas);
               if (result) decoded = result.getText().trim();
             } catch(_) {}
-          }
 
-          if (decoded && decoded !== lastRef.current) {
-            lastRef.current = decoded;
-            setLastScan(decoded);
-            if (navigator.vibrate) navigator.vibrate(80);
-            onScan(decoded);
-          }
-        } catch(_) {}
+            // Strategy B: Native BarcodeDetector (iOS 17+)
+            if (!decoded && "BarcodeDetector" in window) {
+              try {
+                const bd = new window.BarcodeDetector();
+                const results = await bd.detect(canvas);
+                if (results.length > 0) decoded = results[0].rawValue.trim();
+              } catch(_) {}
+            }
 
-        if (!cancelled) loopRef.current = setTimeout(tick, 250);
+            // Strategy C: ZXing luminance source
+            if (!decoded) {
+              try {
+                const imgData = ctx.getImageData(0, 0, w, h);
+                const src = new window.ZXing.RGBLuminanceSource(imgData.data, w, h);
+                const bmp = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
+                const result = reader.decode(bmp);
+                if (result) decoded = result.getText().trim();
+              } catch(_) {}
+            }
+
+            if (decoded && decoded !== lastRef.current) {
+              lastRef.current = decoded;
+              setLastScan(decoded);
+              if (navigator.vibrate) navigator.vibrate(80);
+              onScan(decoded);
+            }
+          } catch(_) {}
+        }
+
+        if (!cancelled) rafId = requestAnimationFrame(tick);
       }
 
-      loopRef.current = setTimeout(tick, 500);
+      rafId = requestAnimationFrame(tick);
+
+      // Override cleanup to cancel RAF
+      return () => {
+        cancelled = true;
+        if (rafId) cancelAnimationFrame(rafId);
+        streamRef.current?.getTracks().forEach(t => t.stop());
+      };
     }
 
     start();
@@ -314,8 +329,7 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       cancelled = true;
       clearTimeout(loopRef.current);
       streamRef.current?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
+    };  }, []);
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:10}}>
