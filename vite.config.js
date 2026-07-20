@@ -6,16 +6,12 @@ export default defineConfig({
   resolve: {
     dedupe: ["react", "react-dom", "react/jsx-runtime"],
   },
-  optimizeDeps: {
-    include: ["react", "react-dom", "@supabase/supabase-js"],
-  },
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ["react", "react-dom"],
-          supabase: ["@supabase/supabase-js"],
-        },
+        // Single bundle — no chunk splitting, no load order issues
+        inlineDynamicImports: true,
+        manualChunks: undefined,
       },
     },
   },
