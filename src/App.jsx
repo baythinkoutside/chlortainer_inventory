@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
 
-// Supabase loaded from CDN to avoid bundler conflicts
-let _supabase = null;
-async function getSupabase() {
-  if (_supabase) return _supabase;
+// Supabase loaded from CDN on first use — never called at module level
+let _sb = null;
+
+async function initSupabase() {
+  if (_sb) return _sb;
   if (!window.supabase) {
     await new Promise((res, rej) => {
       const s = document.createElement("script");
@@ -12,18 +13,12 @@ async function getSupabase() {
       document.head.appendChild(s);
     });
   }
-  _supabase = window.supabase.createClient(
+  _sb = window.supabase.createClient(
     import.meta.env.VITE_SUPABASE_URL,
     import.meta.env.VITE_SUPABASE_ANON_KEY
   );
-  return _supabase;
+  return _sb;
 }
-
-// Synchronous accessor — only call after init
-const supabase = {
-  from: (...args) => _supabase.from(...args),
-  channel: (...args) => _supabase.channel(...args),
-};
 
 // ─── ChlorTainer Brand Tokens ─────────────────────────────────────────────────
 const C = {
@@ -123,10 +118,10 @@ function useSupabaseData() {
 
   const fetchAll = async () => {
     const [{ data: sups }, { data: rawParts }, { data: links }, { data: plates }] = await Promise.all([
-      supabase.from("suppliers").select("*").order("name"),
-      supabase.from("parts").select("*").order("id"),
-      supabase.from("part_suppliers").select("*"),
-      supabase.from("license_plates").select("*").order("created_at", { ascending: false }),
+      _sb.from("suppliers").select("*").order("name"),
+      _sb.from("parts").select("*").order("id"),
+      _sb.from("part_suppliers").select("*"),
+      _sb.from("license_plates").select("*").order("created_at", { ascending: false }),
     ]);
     const stitched = (rawParts||[]).map(p => ({
       ...p, minStock: p.min_stock,
@@ -144,15 +139,15 @@ function useSupabaseData() {
     let subs = [];
     (async () => {
       try {
-        await getSupabase(); // load CDN and create client first
+        await initSupabase(); // load CDN and create client first
         await fetchAll();
         setLoading(false);
         const refresh = () => fetchAll();
         subs = [
-          supabase.channel("parts-ch").on("postgres_changes",{event:"*",schema:"public",table:"parts"},refresh).subscribe(),
-          supabase.channel("sups-ch").on("postgres_changes",{event:"*",schema:"public",table:"suppliers"},refresh).subscribe(),
-          supabase.channel("links-ch").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
-          supabase.channel("lps-ch").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
+          _sb.channel("parts-ch").on("postgres_changes",{event:"*",schema:"public",table:"parts"},refresh).subscribe(),
+          _sb.channel("sups-ch").on("postgres_changes",{event:"*",schema:"public",table:"suppliers"},refresh).subscribe(),
+          _sb.channel("links-ch").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
+          _sb.channel("lps-ch").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
         ];
       } catch(e) { setError(e.message); setLoading(false); }
     })();
@@ -163,35 +158,35 @@ function useSupabaseData() {
 
   async function addPart(form) {
     const id = `CT-BC-${String(parts.length+1).padStart(4,"0")}`;
-    await supabase.from("parts").insert({ id, description:form.description, category:form.category,
+    await _sb.from("parts").insert({ id, description:form.description, category:form.category,
       uom:form.uom, stock:+form.stock||0, min_stock:+form.minStock||0, location:form.location });
   }
 
   async function updateStock(partId, newStock) {
-    await supabase.from("parts").update({ stock: newStock }).eq("id", partId);
+    await _sb.from("parts").update({ stock: newStock }).eq("id", partId);
   }
 
   async function addSupplier(form) {
     const id = `SUP-${String(suppliers.length+1).padStart(3,"0")}`;
-    await supabase.from("suppliers").insert({ id, name:form.name, contact:form.contact, phone:form.phone });
+    await _sb.from("suppliers").insert({ id, name:form.name, contact:form.contact, phone:form.phone });
   }
 
   async function linkSupplier(partId, form) {
-    await supabase.from("part_suppliers").upsert({
+    await _sb.from("part_suppliers").upsert({
       part_id:partId, supplier_id:form.supplierId, mfg_part_no:form.mfgPartNo,
       lead_days:+form.leadDays||0, unit_cost:+form.unitCost||0
     });
   }
 
   async function unlinkSupplier(partId, supplierId) {
-    await supabase.from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);
+    await _sb.from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);
   }
 
   async function createLP(form, items) {
     const today = new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix = Math.random().toString(36).slice(2,6).toUpperCase();
     const id = `LP-${today}-${suffix}`;
-    await supabase.from("license_plates").insert({
+    await _sb.from("license_plates").insert({
       id, type:form.type, destination:form.destination,
       status:form.status, created_at:new Date().toISOString().slice(0,10), items,
     });
@@ -199,7 +194,7 @@ function useSupabaseData() {
   }
 
   async function updateLPStatus(lpId, status) {
-    await supabase.from("license_plates").update({ status }).eq("id", lpId);
+    await _sb.from("license_plates").update({ status }).eq("id", lpId);
   }
 
   return { parts, suppliers, lps, loading, error,
