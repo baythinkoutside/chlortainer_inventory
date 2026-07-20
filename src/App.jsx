@@ -184,18 +184,226 @@ function useSupabaseData() {
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
 
 function CameraScanner({ onScan, onClose, hint="" }) {
-  const videoRef   = useRef(null);
-  const canvasRef  = useRef(null);
-  const streamRef  = useRef(null);
-  const captureRef = useRef(null);
-  const loopRef    = useRef(null);
-  const lastRef    = useRef("");
-  const frameRef   = useRef(0);
+  const videoRef  = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const loopRef   = useRef(null);
+  const lastRef   = useRef("");
+  const frameRef  = useRef(0);
   const [status,     setStatus]     = useState("starting");
   const [errMsg,     setErrMsg]     = useState("");
   const [lastScan,   setLastScan]   = useState("");
   const [frameCount, setFrameCount] = useState(0);
   const [method,     setMethod]     = useState("—");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function start() {
+      // 1. Camera stream
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } },
+          audio: false,
+        });
+      } catch(e) {
+        if (!cancelled) {
+          setStatus("error");
+          setErrMsg(e.name === "NotAllowedError"
+            ? "Camera denied. Go to Settings → Safari → Camera → Allow, then reload."
+            : `Camera error: ${e.message}`);
+        }
+        return;
+      }
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+      streamRef.current = stream;
+
+      // 2. Attach to video for display
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      await new Promise(res => {
+        video.onloadedmetadata = () => video.play().then(res).catch(res);
+      });
+      if (cancelled) return;
+      setStatus("scanning");
+
+      // 3. Load ZXing
+      if (!window.ZXing) {
+        await new Promise((res, rej) => {
+          const s = document.createElement("script");
+          s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
+      }
+      if (cancelled) return;
+
+      const reader = new window.ZXing.BrowserMultiFormatReader();
+      const canvas = canvasRef.current;
+      const ctx    = canvas.getContext("2d", { willReadFrequently: true });
+
+      // 4. Decode loop — createImageBitmap(video) is the iOS-safe way to read frames
+      //    It does NOT taint the canvas and does NOT trigger the screen-recording prompt
+      async function decode() {
+        if (cancelled) return;
+
+        try {
+          let bitmap = null;
+          let usedMethod = "—";
+
+          // createImageBitmap(video) — works on iOS 15+ without canvas taint
+          try {
+            bitmap = await createImageBitmap(video);
+            usedMethod = "createImageBitmap";
+          } catch(_) {}
+
+          if (bitmap) {
+            canvas.width  = bitmap.width;
+            canvas.height = bitmap.height;
+            ctx.drawImage(bitmap, 0, 0);
+            bitmap.close();
+            setMethod(usedMethod);
+          } else {
+            // Last resort: direct video draw
+            const w = video.videoWidth  || 1280;
+            const h = video.videoHeight || 720;
+            canvas.width = w; canvas.height = h;
+            ctx.drawImage(video, 0, 0, w, h);
+            setMethod("video-direct");
+          }
+
+          frameRef.current++;
+          setFrameCount(frameRef.current);
+
+          let decoded = null;
+
+          // A: ZXing decodeFromCanvas
+          try {
+            const r = reader.decodeFromCanvas(canvas);
+            if (r) decoded = r.getText().trim();
+          } catch(_) {}
+
+          // B: BarcodeDetector (iOS 17+, Chrome)
+          if (!decoded && "BarcodeDetector" in window) {
+            try {
+              const bd = new window.BarcodeDetector();
+              const results = await bd.detect(canvas);
+              if (results.length > 0) decoded = results[0].rawValue.trim();
+            } catch(_) {}
+          }
+
+          // C: ZXing luminance source
+          if (!decoded) {
+            try {
+              const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const src = new window.ZXing.RGBLuminanceSource(id.data, canvas.width, canvas.height);
+              const bmp2 = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
+              const r = reader.decode(bmp2);
+              if (r) decoded = r.getText().trim();
+            } catch(_) {}
+          }
+
+          if (decoded && decoded !== lastRef.current) {
+            lastRef.current = decoded;
+            setLastScan(decoded);
+            if (navigator.vibrate) navigator.vibrate(80);
+            onScan(decoded);
+          }
+
+        } catch(_) {}
+
+        if (!cancelled) loopRef.current = setTimeout(decode, 300);
+      }
+
+      loopRef.current = setTimeout(decode, 1000);
+    }
+
+    start();
+    return () => {
+      cancelled = true;
+      clearTimeout(loopRef.current);
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <canvas ref={canvasRef} style={{display:"none"}}/>
+
+      <div style={{position:"relative",background:"#000",borderRadius:10,overflow:"hidden",aspectRatio:"4/3"}}>
+        <video ref={videoRef} playsInline muted autoPlay
+          style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+
+        {status==="scanning" && <>
+          {[{t:16,l:16,bt:"top",bl:"left"},{t:16,r:16,bt:"top",bl:"right"},
+            {b:16,l:16,bt:"bottom",bl:"left"},{b:16,r:16,bt:"bottom",bl:"right"}
+          ].map((pos,i) => (
+            <div key={i} style={{position:"absolute",...pos,width:28,height:28,
+              borderTop:   pos.bt==="top"    ?`3px solid ${C.amber}`:"none",
+              borderBottom:pos.bt==="bottom" ?`3px solid ${C.amber}`:"none",
+              borderLeft:  pos.bl==="left"   ?`3px solid ${C.amber}`:"none",
+              borderRight: pos.bl==="right"  ?`3px solid ${C.amber}`:"none"}}/>
+          ))}
+          <div style={{position:"absolute",left:28,right:28,height:2,
+            background:C.amber,opacity:.9,animation:"scanline 2s ease-in-out infinite"}}/>
+          <style>{`@keyframes scanline{0%,100%{top:20%}50%{top:80%}}`}</style>
+          <div style={{position:"absolute",top:8,left:0,right:0,textAlign:"center"}}>
+            <span style={{background:"rgba(28,43,58,.75)",color:C.amber,fontSize:11,
+              fontWeight:700,padding:"3px 12px",borderRadius:10}}>SCANNING</span>
+          </div>
+          <div style={{position:"absolute",bottom:8,right:10,
+            background:"rgba(0,0,0,.55)",borderRadius:6,padding:"2px 8px",
+            fontSize:10,color:"#aaa",fontFamily:"monospace"}}>f:{frameCount}</div>
+        </>}
+
+        {status==="starting" && (
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
+            alignItems:"center",justifyContent:"center",gap:12,background:"rgba(0,0,0,.65)"}}>
+            <div style={{width:36,height:36,border:`3px solid ${C.amber}`,
+              borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            <span style={{color:"#fff",fontSize:13}}>Starting camera…</span>
+          </div>
+        )}
+
+        {status==="error" && (
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
+            alignItems:"center",justifyContent:"center",gap:10,padding:20,background:"rgba(0,0,0,.85)"}}>
+            <span style={{fontSize:32}}>📵</span>
+            <span style={{color:"#fff",fontSize:12,textAlign:"center",lineHeight:1.5}}>{errMsg}</span>
+          </div>
+        )}
+
+        {lastScan && (
+          <div style={{position:"absolute",bottom:0,left:0,right:0,
+            background:"rgba(28,43,58,.9)",padding:"10px 14px",display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:18}}>✅</span>
+            <span style={{color:"#fff",fontFamily:"monospace",fontSize:13,fontWeight:700}}>{lastScan}</span>
+          </div>
+        )}
+      </div>
+
+      {hint && (
+        <div style={{background:C.amberLight,border:`1px solid ${C.amberBdr}`,borderRadius:6,
+          padding:"10px 14px",fontSize:12,color:C.warnText,display:"flex",gap:8,alignItems:"center"}}>
+          <span>💡</span><span>{hint}</span>
+        </div>
+      )}
+
+      <div style={{background:"#0D1520",borderRadius:8,padding:"10px 14px",
+        fontSize:11,color:"#8A9BB0",fontFamily:"monospace",lineHeight:1.8}}>
+        <div>📷 camera: {status}</div>
+        <div>🔢 frames: {frameCount}</div>
+        <div>⚙️ method: {method}</div>
+        <div>✅ decoded: {lastScan||"—"}</div>
+      </div>
+
+      <Btn variant="outline" onClick={onClose} style={{justifyContent:"center"}}>Close Camera</Btn>
+    </div>
+  );
+}
 
   useEffect(() => {
     let cancelled = false;
@@ -339,86 +547,6 @@ function CameraScanner({ onScan, onClose, hint="" }) {
     };
   }, []);
 
-  return (
-    <div style={{display:"flex",flexDirection:"column",gap:10}}>
-      <canvas ref={canvasRef} style={{display:"none"}}/>
-
-      <div style={{position:"relative",background:"#000",borderRadius:10,overflow:"hidden",aspectRatio:"4/3"}}>
-        <video ref={videoRef} playsInline muted autoPlay
-          style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
-
-        {status==="scanning" && <>
-          {[{t:16,l:16,bt:"top",bl:"left"},{t:16,r:16,bt:"top",bl:"right"},
-            {b:16,l:16,bt:"bottom",bl:"left"},{b:16,r:16,bt:"bottom",bl:"right"}
-          ].map((pos,i) => (
-            <div key={i} style={{position:"absolute",...pos,width:28,height:28,
-              borderTop:   pos.bt==="top"    ?`3px solid ${C.amber}`:"none",
-              borderBottom:pos.bt==="bottom" ?`3px solid ${C.amber}`:"none",
-              borderLeft:  pos.bl==="left"   ?`3px solid ${C.amber}`:"none",
-              borderRight: pos.bl==="right"  ?`3px solid ${C.amber}`:"none"}}/>
-          ))}
-          <div style={{position:"absolute",left:28,right:28,height:2,
-            background:C.amber,opacity:.9,animation:"scanline 2s ease-in-out infinite"}}/>
-          <style>{`@keyframes scanline{0%,100%{top:20%}50%{top:80%}}`}</style>
-          <div style={{position:"absolute",top:8,left:0,right:0,textAlign:"center"}}>
-            <span style={{background:"rgba(28,43,58,.75)",color:C.amber,fontSize:11,
-              fontWeight:700,padding:"3px 12px",borderRadius:10}}>SCANNING</span>
-          </div>
-          <div style={{position:"absolute",bottom:8,right:10,
-            background:"rgba(0,0,0,.55)",borderRadius:6,padding:"2px 8px",
-            fontSize:10,color:"#aaa",fontFamily:"monospace"}}>
-            f:{frameCount}
-          </div>
-        </>}
-
-        {status==="starting" && (
-          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
-            alignItems:"center",justifyContent:"center",gap:12,background:"rgba(0,0,0,.65)"}}>
-            <div style={{width:36,height:36,border:`3px solid ${C.amber}`,
-              borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
-            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-            <span style={{color:"#fff",fontSize:13}}>Starting camera…</span>
-          </div>
-        )}
-
-        {status==="error" && (
-          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
-            alignItems:"center",justifyContent:"center",gap:10,padding:20,
-            background:"rgba(0,0,0,.85)"}}>
-            <span style={{fontSize:32}}>📵</span>
-            <span style={{color:"#fff",fontSize:12,textAlign:"center",lineHeight:1.5}}>{errMsg}</span>
-          </div>
-        )}
-
-        {lastScan && (
-          <div style={{position:"absolute",bottom:0,left:0,right:0,
-            background:"rgba(28,43,58,.9)",padding:"10px 14px",
-            display:"flex",alignItems:"center",gap:8}}>
-            <span style={{fontSize:18}}>✅</span>
-            <span style={{color:"#fff",fontFamily:"monospace",fontSize:13,fontWeight:700}}>{lastScan}</span>
-          </div>
-        )}
-      </div>
-
-      {hint && (
-        <div style={{background:C.amberLight,border:`1px solid ${C.amberBdr}`,borderRadius:6,
-          padding:"10px 14px",fontSize:12,color:C.warnText,display:"flex",gap:8,alignItems:"center"}}>
-          <span>💡</span><span>{hint}</span>
-        </div>
-      )}
-
-      <div style={{background:"#0D1520",borderRadius:8,padding:"10px 14px",
-        fontSize:11,color:"#8A9BB0",fontFamily:"monospace",lineHeight:1.8}}>
-        <div>📷 camera: {status}</div>
-        <div>🔢 frames: {frameCount}</div>
-        <div>⚙️ method: {method}</div>
-        <div>✅ decoded: {lastScan||"—"}</div>
-      </div>
-
-      <Btn variant="outline" onClick={onClose} style={{justifyContent:"center"}}>Close Camera</Btn>
-    </div>
-  );
-}
 
 
 
