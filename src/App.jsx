@@ -1,10 +1,29 @@
 import React, { useState, useEffect, useRef } from "react";
-import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+// Supabase loaded from CDN to avoid bundler conflicts
+let _supabase = null;
+async function getSupabase() {
+  if (_supabase) return _supabase;
+  if (!window.supabase) {
+    await new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js";
+      s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  _supabase = window.supabase.createClient(
+    import.meta.env.VITE_SUPABASE_URL,
+    import.meta.env.VITE_SUPABASE_ANON_KEY
+  );
+  return _supabase;
+}
+
+// Synchronous accessor — only call after init
+const supabase = {
+  from: (...args) => _supabase.from(...args),
+  channel: (...args) => _supabase.channel(...args),
+};
 
 // ─── ChlorTainer Brand Tokens ─────────────────────────────────────────────────
 const C = {
@@ -125,6 +144,7 @@ function useSupabaseData() {
     let subs = [];
     (async () => {
       try {
+        await getSupabase(); // load CDN and create client first
         await fetchAll();
         setLoading(false);
         const refresh = () => fetchAll();
