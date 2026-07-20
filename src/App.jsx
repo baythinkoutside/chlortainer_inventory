@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef } from "react";
-import { supabase } from "./supabase.js";
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 // ─── ChlorTainer Brand Tokens ─────────────────────────────────────────────────
 const C = {
