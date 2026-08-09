@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { BrowserMultiFormatReader } from "@zxing/library";
+import { BrowserMultiFormatReader } from "@zxing/browser";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -334,8 +334,7 @@ function CameraScanner({ onScan, onClose, hint="" }) {
 
             if (!decoded) {
               try {
-                const { RGBLuminanceSource, BinaryBitmap, HybridBinarizer } = await import("@zxing/library");
-                const id = ctx.getImageData(0, 0, w, h);
+                const { RGBLuminanceSource, BinaryBitmap, HybridBinarizer } = await import("@zxing/library");                const id = ctx.getImageData(0, 0, w, h);
                 const src = new RGBLuminanceSource(id.data, w, h);
                 const bmp2 = new BinaryBitmap(new HybridBinarizer(src));
                 const r = reader.decode(bmp2);
@@ -714,7 +713,29 @@ function PartDetailModal({ part, suppliers, parts, actions, onClose }) {
   const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
   return <Modal title={live.id} onClose={onClose}>
     <div style={{display:"grid",gap:20}}>
-      <div style={{display:"flex",justifyContent:"center",padding:"14px 0",background:C.offWhite,borderRadius:6}}><BarcodeDisplay code={live.id} size="lg"/></div>
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"14px 0",background:C.offWhite,borderRadius:6,gap:10}}>
+        <BarcodeDisplay code={live.id} size="lg"/>
+        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
+          const w=window.open("","_blank");
+          w.document.write(`<!DOCTYPE html><html><head><title>${live.id}</title>
+            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
+            <style>body{font-family:Arial,sans-serif;padding:20px;display:flex;justify-content:center;}
+            .label{border:1.5px solid #E0E3E7;border-radius:8px;padding:16px;width:300px;text-align:center;}
+            .bar{width:4px;height:20px;background:#F5A623;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:middle;}
+            h3{margin:0 0 4px;font-size:11px;color:#8A9BB0;text-transform:uppercase;letter-spacing:1px;}
+            p{margin:4px 0;font-size:12px;color:#1C2B3A;}
+            .meta{font-size:10px;color:#8A9BB0;margin-top:8px;}</style></head>
+            <body onload="window.print()"><div class="label">
+            <div><span class="bar"></span><strong style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#1C2B3A;">ChlorTainer</strong></div>
+            <svg id="bc"></svg>
+            <p><strong>${live.description}</strong></p>
+            <div class="meta">${live.category} · ${live.uom} · ${live.location||"—"}</div>
+            </div>
+            <script>JsBarcode("#bc","${live.id}",{format:"CODE128",width:2,height:50,displayValue:true,fontSize:11,margin:4,lineColor:"#1C2B3A"});<\/script>
+            </body></html>`);
+          w.document.close();
+        }}>🖨️ Print Label</Btn>
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         {[["Description",live.description],["Category",<Badge color="navy">{live.category}</Badge>],
           ["Location",<span style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location||"—"}</span>],["UOM",live.uom]]
@@ -915,7 +936,29 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
       <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"16px 0",background:C.offWhite,borderRadius:6,gap:8}}>
         <BarcodeDisplay code={lp.id} size="lg"/>
         <div style={{display:"flex",gap:8}}><Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge><Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge></div>
-      </div>
+        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
+          const itemRows=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);return `<tr><td style="font-family:monospace;font-weight:700;color:#1C2B3A;padding:4px 8px;">${it.partId}</td><td style="padding:4px 8px;color:#4A5568;">${p?.description||"—"}</td><td style="padding:4px 8px;font-family:monospace;font-weight:700;color:#F5A623;text-align:right;">×${it.qty}</td></tr>`;}).join("");
+          const w=window.open("","_blank");
+          w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
+            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
+            <style>body{font-family:Arial,sans-serif;padding:20px;max-width:400px;margin:0 auto;}
+            .lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;}
+            .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+            .company{font-size:16px;font-weight:900;color:#1C2B3A;}
+            .badge{font-size:9px;font-weight:700;padding:3px 8px;border-radius:3px;text-transform:uppercase;}
+            table{width:100%;border-collapse:collapse;margin-top:10px;border-top:1px solid #E0E3E7;}
+            .footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;margin-top:10px;padding-top:8px;border-top:1px solid #E0E3E7;}
+            </style></head>
+            <body onload="window.print()"><div class="lp">
+            <div class="header"><div class="company">ChlorTainer</div><span class="badge">${lp.type}</span></div>
+            <svg id="lp-bc"></svg>
+            <table>${itemRows}</table>
+            <div class="footer"><span>→ ${lp.destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${lp.status.toUpperCase()}</span></div>
+            </div>
+            <script>JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});<\/script>
+            </body></html>`);
+          w.document.close();
+        }}>🖨️ Print License Plate</Btn>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         {[["Destination",lp.destination],["Created",lp.createdAt||lp.created_at],["Line Items",lp.items?.length||0],["Total Qty",(lp.items||[]).reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
           <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
