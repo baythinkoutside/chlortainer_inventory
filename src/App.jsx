@@ -936,6 +936,7 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
             </body></html>`);
           w.document.close();
         }}>🖨️ Print License Plate</Btn>
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         {[["Destination",lp.destination],["Created",lp.createdAt||lp.created_at],["Line Items",lp.items?.length||0],["Total Qty",(lp.items||[]).reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
           <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
