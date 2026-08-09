@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import { BrowserMultiFormatReader, RGBLuminanceSource, BinaryBitmap, HybridBinarizer } from "@zxing/library";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -252,118 +251,90 @@ function CameraScanner({ onScan, onClose, hint="" }) {
   const streamRef = useRef(null);
   const loopRef   = useRef(null);
   const lastRef   = useRef("");
-  const [status,setStatus]=useState("starting");
-  const [errMsg,setErrMsg]=useState("");
-  const [lastScan,setLastScan]=useState("");
+  const [status,   setStatus]   = useState("starting");
+  const [errMsg,   setErrMsg]   = useState("");
+  const [lastScan, setLastScan] = useState("");
 
   useEffect(()=>{
-    let cancelled=false;
+    let cancelled = false;
+
     async function start(){
+      // 1. Get camera stream
       let stream;
       try {
-        stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
+        stream = await navigator.mediaDevices.getUserMedia({
+          video:{ facingMode:{ ideal:"environment" } }, audio:false
+        });
       } catch(e){
-        if(!cancelled){setStatus("error");setErrMsg(e.name==="NotAllowedError"?"Camera denied. Go to Settings → Safari → Camera → Allow.":"Camera error: "+e.message);}
+        if(!cancelled){
+          setStatus("error");
+          setErrMsg(e.name==="NotAllowedError"
+            ? "Camera denied. Go to Settings → Chrome → Camera → Allow."
+            : "Camera error: "+e.message);
+        }
         return;
       }
-      if(cancelled){stream.getTracks().forEach(t=>t.stop());return;}
-      streamRef.current=stream;
-      const video=videoRef.current;
-      if(!video)return;
-      video.srcObject=stream;
-      await new Promise(res=>{video.onloadedmetadata=()=>video.play().then(res).catch(res);});
-      if(cancelled)return;
+      if(cancelled){ stream.getTracks().forEach(t=>t.stop()); return; }
+      streamRef.current = stream;
+
+      // 2. Show video
+      const video = videoRef.current;
+      if(!video) return;
+      video.srcObject = stream;
+      await new Promise(res=>{ video.onloadedmetadata=()=>video.play().then(res).catch(res); });
+      if(cancelled) return;
       setStatus("scanning");
-      
 
-      const reader = new BrowserMultiFormatReader();
+      // 3. Settle
+      await new Promise(res=>setTimeout(res,600));
+      if(cancelled) return;
+
       const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d", {willReadFrequently:true});
+      const ctx = canvas.getContext("2d",{willReadFrequently:true});
 
-      
-      await new Promise(res => setTimeout(res, 500));
-      if (cancelled) return;
-      
-
+      // 4. Decode loop — BarcodeDetector only (built into Android Chrome)
       async function decode(){
-        if(cancelled)return;
-
+        if(cancelled) return;
         try {
-          const w = video.videoWidth  || 1280;
-          const h = video.videoHeight || 720;
-          canvas.width  = w;
-          canvas.height = h;
+          // Draw frame
+          let ok = false;
+          try { const b=await createImageBitmap(video); canvas.width=b.width; canvas.height=b.height; ctx.drawImage(b,0,0); b.close(); ok=true; } catch(_){}
+          if(!ok){ try{ canvas.width=video.videoWidth||1280; canvas.height=video.videoHeight||720; ctx.drawImage(video,0,0,canvas.width,canvas.height); ok=true; }catch(_){} }
 
-          let bitmapOk = false;
-          try {
-            const bitmap = await createImageBitmap(video);
-            ctx.drawImage(bitmap, 0, 0, w, h);
-            bitmap.close();
-            bitmapOk = true;
-            
-          } catch(e1) {
-            try {
-              ctx.drawImage(video, 0, 0, w, h);
-              bitmapOk = true;
-              
-            } catch(e2) {
-              
-            }
-          }
-
-          
-          
-
-          if (bitmapOk) {
+          if(ok){
             let decoded = null;
 
-            if ("BarcodeDetector" in window) {
+            // Native BarcodeDetector (Android Chrome 83+)
+            if("BarcodeDetector" in window){
               try {
-                const bd = new window.BarcodeDetector();
+                const bd = new window.BarcodeDetector({formats:["code_128","code_39","ean_13","ean_8","qr_code","upc_a","upc_e","itf","codabar"]});
                 const rs = await bd.detect(canvas);
-                if (rs.length > 0) decoded = rs[0].rawValue.trim();
-              } catch(_) {}
+                if(rs.length>0) decoded = rs[0].rawValue.trim();
+              } catch(_){}
             }
 
-            if (!decoded) {
-              try {
-                const r = reader.decodeFromCanvas(canvas);
-                if (r) decoded = r.getText().trim();
-              } catch(_) {}
-            }
-
-            if (!decoded) {
-              try {
-                const id = ctx.getImageData(0, 0, w, h);
-                const src = new RGBLuminanceSource(id.data, w, h);
-                const bmp2 = new BinaryBitmap(new HybridBinarizer(src));
-                const r = reader.decode(bmp2);
-                if (r) decoded = r.getText().trim();
-              } catch(_) {}
-            }
-
-            if (decoded && decoded !== lastRef.current) {
+            if(decoded && decoded!==lastRef.current){
               lastRef.current = decoded;
               setLastScan(decoded);
-              if (navigator.vibrate) navigator.vibrate(80);
+              if(navigator.vibrate) navigator.vibrate(80);
               onScan(decoded);
             }
           }
-        } catch(e) {
-          .slice(0,15));
-          
-          
-        }
-
-        if (!cancelled) loopRef.current = setTimeout(decode, 250);
+        } catch(_){}
+        if(!cancelled) loopRef.current = setTimeout(decode,250);
       }
 
-      // Call decode directly — don't rely on setTimeout for first call
       decode();
     }
+
     start();
-    return()=>{cancelled=true;clearTimeout(loopRef.current);streamRef.current?.getTracks().forEach(t=>t.stop());};
+    return ()=>{
+      cancelled=true;
+      clearTimeout(loopRef.current);
+      streamRef.current?.getTracks().forEach(t=>t.stop());
+    };
   },[]);
+
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -372,7 +343,11 @@ function CameraScanner({ onScan, onClose, hint="" }) {
         <video ref={videoRef} playsInline muted autoPlay style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
         {status==="scanning"&&<>
           {[{t:16,l:16,bt:"top",bl:"left"},{t:16,r:16,bt:"top",bl:"right"},{b:16,l:16,bt:"bottom",bl:"left"},{b:16,r:16,bt:"bottom",bl:"right"}].map((pos,i)=>(
-            <div key={i} style={{position:"absolute",...pos,width:28,height:28,borderTop:pos.bt==="top"?`3px solid ${C.amber}`:"none",borderBottom:pos.bt==="bottom"?`3px solid ${C.amber}`:"none",borderLeft:pos.bl==="left"?`3px solid ${C.amber}`:"none",borderRight:pos.bl==="right"?`3px solid ${C.amber}`:"none"}}/>
+            <div key={i} style={{position:"absolute",...pos,width:28,height:28,
+              borderTop:pos.bt==="top"?`3px solid ${C.amber}`:"none",
+              borderBottom:pos.bt==="bottom"?`3px solid ${C.amber}`:"none",
+              borderLeft:pos.bl==="left"?`3px solid ${C.amber}`:"none",
+              borderRight:pos.bl==="right"?`3px solid ${C.amber}`:"none"}}/>
           ))}
           <div style={{position:"absolute",left:28,right:28,height:2,background:C.amber,opacity:.9,animation:"scanline 2s ease-in-out infinite"}}/>
           <style>{`@keyframes scanline{0%,100%{top:20%}50%{top:80%}}`}</style>
@@ -382,6 +357,7 @@ function CameraScanner({ onScan, onClose, hint="" }) {
         </>}
         {status==="starting"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,background:"rgba(0,0,0,.65)"}}>
           <div style={{width:36,height:36,border:`3px solid ${C.amber}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+          <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
           <span style={{color:"#fff",fontSize:13}}>Starting camera…</span>
         </div>}
         {status==="error"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:20,background:"rgba(0,0,0,.85)"}}>
