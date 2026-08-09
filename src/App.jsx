@@ -1,3 +1,4 @@
+// ChlorTainer Inventory System v2.1
 import { useState, useEffect, useRef } from "react";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
