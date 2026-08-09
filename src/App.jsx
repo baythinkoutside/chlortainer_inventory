@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { BrowserMultiFormatReader } from "@zxing/library";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -276,28 +277,11 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       await new Promise(res=>{video.onloadedmetadata=()=>video.play().then(res).catch(res);});
       if(cancelled)return;
       setStatus("scanning");
-      setMethod("step:zxing");
-
-      if(!window.ZXing){
-        try {
-          await new Promise((res,rej)=>{
-            const s=document.createElement("script");
-            s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";
-            s.onload=res;
-            s.onerror=()=>rej(new Error("CDN load failed"));
-            document.head.appendChild(s);
-          });
-        } catch(e) {
-          setMethod("zxing-fail"); setStatus("error"); setErrMsg("Barcode library failed to load"); return;
-        }
-      }
-
-      if(cancelled)return;
       setMethod("step:reader");
 
-      const reader=new window.ZXing.BrowserMultiFormatReader();
-      const canvas=canvasRef.current;
-      const ctx=canvas.getContext("2d",{willReadFrequently:true});
+      const reader = new BrowserMultiFormatReader();
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext("2d", {willReadFrequently:true});
 
       setMethod("step:settle");
       await new Promise(res => setTimeout(res, 500));
@@ -353,9 +337,10 @@ function CameraScanner({ onScan, onClose, hint="" }) {
 
             if (!decoded) {
               try {
+                const { RGBLuminanceSource, BinaryBitmap, HybridBinarizer } = await import("@zxing/library");
                 const id = ctx.getImageData(0, 0, w, h);
-                const src = new window.ZXing.RGBLuminanceSource(id.data, w, h);
-                const bmp2 = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
+                const src = new RGBLuminanceSource(id.data, w, h);
+                const bmp2 = new BinaryBitmap(new HybridBinarizer(src));
                 const r = reader.decode(bmp2);
                 if (r) decoded = r.getText().trim();
               } catch(_) {}
