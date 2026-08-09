@@ -285,21 +285,87 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       const ctx=canvas.getContext("2d",{willReadFrequently:true});
       async function decode(){
         if(cancelled)return;
+
         try {
-          let bitmap=null;
-          try{bitmap=await createImageBitmap(video);}catch(_){}
-          if(bitmap){canvas.width=bitmap.width;canvas.height=bitmap.height;ctx.drawImage(bitmap,0,0);bitmap.close();setMethod("createImageBitmap");}
-          else{const w=video.videoWidth||1280,h=video.videoHeight||720;canvas.width=w;canvas.height=h;ctx.drawImage(video,0,0,w,h);setMethod("video");}
-          frameRef.current++;setFrameCount(frameRef.current);
-          let decoded=null;
-          try{const r=reader.decodeFromCanvas(canvas);if(r)decoded=r.getText().trim();}catch(_){}
-          if(!decoded&&"BarcodeDetector"in window){try{const bd=new window.BarcodeDetector();const rs=await bd.detect(canvas);if(rs.length>0)decoded=rs[0].rawValue.trim();}catch(_){}}
-          if(!decoded){try{const id=ctx.getImageData(0,0,canvas.width,canvas.height);const src=new window.ZXing.RGBLuminanceSource(id.data,canvas.width,canvas.height);const bmp=new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));const r=reader.decode(bmp);if(r)decoded=r.getText().trim();}catch(_){}}
-          if(decoded&&decoded!==lastRef.current){lastRef.current=decoded;setLastScan(decoded);if(navigator.vibrate)navigator.vibrate(80);onScan(decoded);}
-        }catch(_){}
-        if(!cancelled)loopRef.current=setTimeout(decode,300);
+          const w = video.videoWidth  || 1280;
+          const h = video.videoHeight || 720;
+          canvas.width  = w;
+          canvas.height = h;
+
+          // Try createImageBitmap first
+          let bitmapOk = false;
+          try {
+            const bitmap = await createImageBitmap(video);
+            ctx.drawImage(bitmap, 0, 0, w, h);
+            bitmap.close();
+            bitmapOk = true;
+            setMethod("bitmap");
+          } catch(e1) {
+            // Fall back to direct video draw
+            try {
+              ctx.drawImage(video, 0, 0, w, h);
+              bitmapOk = true;
+              setMethod("video");
+            } catch(e2) {
+              setMethod("err:" + e2.message.slice(0,20));
+            }
+          }
+
+          // Always increment frame counter so we know the loop is running
+          frameRef.current++;
+          setFrameCount(frameRef.current);
+
+          if (!bitmapOk) {
+            if(!cancelled) loopRef.current = setTimeout(decode, 300);
+            return;
+          }
+
+          let decoded = null;
+
+          // Strategy A: Native BarcodeDetector (Android Chrome)
+          if ("BarcodeDetector" in window) {
+            try {
+              const bd = new window.BarcodeDetector();
+              const rs = await bd.detect(canvas);
+              if (rs.length > 0) decoded = rs[0].rawValue.trim();
+            } catch(_) {}
+          }
+
+          // Strategy B: ZXing decodeFromCanvas
+          if (!decoded) {
+            try {
+              const r = reader.decodeFromCanvas(canvas);
+              if (r) decoded = r.getText().trim();
+            } catch(_) {}
+          }
+
+          // Strategy C: ZXing luminance
+          if (!decoded) {
+            try {
+              const id = ctx.getImageData(0, 0, w, h);
+              const src = new window.ZXing.RGBLuminanceSource(id.data, w, h);
+              const bmp2 = new window.ZXing.BinaryBitmap(new window.ZXing.HybridBinarizer(src));
+              const r = reader.decode(bmp2);
+              if (r) decoded = r.getText().trim();
+            } catch(_) {}
+          }
+
+          if (decoded && decoded !== lastRef.current) {
+            lastRef.current = decoded;
+            setLastScan(decoded);
+            if (navigator.vibrate) navigator.vibrate(80);
+            onScan(decoded);
+          }
+
+        } catch(e) {
+          setMethod("loop-err:" + e.message.slice(0,20));
+          frameRef.current++;
+          setFrameCount(frameRef.current);
+        }
+
+        if(!cancelled) loopRef.current = setTimeout(decode, 300);
       }
-      loopRef.current=setTimeout(decode,800);
+      loopRef.current = setTimeout(decode, 800);
     }
     start();
     return()=>{cancelled=true;clearTimeout(loopRef.current);streamRef.current?.getTracks().forEach(t=>t.stop());};
