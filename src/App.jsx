@@ -276,19 +276,33 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       await new Promise(res=>{video.onloadedmetadata=()=>video.play().then(res).catch(res);});
       if(cancelled)return;
       setStatus("scanning");
+      setMethod("step:zxing");
+
       if(!window.ZXing){
-        await new Promise((res,rej)=>{const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";s.onload=res;s.onerror=rej;document.head.appendChild(s);});
+        try {
+          await new Promise((res,rej)=>{
+            const s=document.createElement("script");
+            s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.2/zxing.min.js";
+            s.onload=res;
+            s.onerror=()=>rej(new Error("CDN load failed"));
+            document.head.appendChild(s);
+          });
+        } catch(e) {
+          setMethod("zxing-fail"); setStatus("error"); setErrMsg("Barcode library failed to load"); return;
+        }
       }
+
       if(cancelled)return;
+      setMethod("step:reader");
+
       const reader=new window.ZXing.BrowserMultiFormatReader();
       const canvas=canvasRef.current;
       const ctx=canvas.getContext("2d",{willReadFrequently:true});
-      // Start decode loop immediately after a short video settle
+
+      setMethod("step:settle");
       await new Promise(res => setTimeout(res, 500));
       if (cancelled) return;
-
-      // Confirm video is actually playing
-      setMethod("starting-loop");
+      setMethod("step:loop-start");
 
       async function decode(){
         if(cancelled)return;
