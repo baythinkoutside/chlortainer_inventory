@@ -252,12 +252,9 @@ function CameraScanner({ onScan, onClose, hint="" }) {
   const streamRef = useRef(null);
   const loopRef   = useRef(null);
   const lastRef   = useRef("");
-  const frameRef  = useRef(0);
   const [status,setStatus]=useState("starting");
   const [errMsg,setErrMsg]=useState("");
   const [lastScan,setLastScan]=useState("");
-  const [frameCount,setFrameCount]=useState(0);
-  const [method,setMethod]=useState("—");
 
   useEffect(()=>{
     let cancelled=false;
@@ -277,16 +274,16 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       await new Promise(res=>{video.onloadedmetadata=()=>video.play().then(res).catch(res);});
       if(cancelled)return;
       setStatus("scanning");
-      setMethod("step:reader");
+      
 
       const reader = new BrowserMultiFormatReader();
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d", {willReadFrequently:true});
 
-      setMethod("step:settle");
+      
       await new Promise(res => setTimeout(res, 500));
       if (cancelled) return;
-      setMethod("step:loop-start");
+      
 
       async function decode(){
         if(cancelled)return;
@@ -303,19 +300,19 @@ function CameraScanner({ onScan, onClose, hint="" }) {
             ctx.drawImage(bitmap, 0, 0, w, h);
             bitmap.close();
             bitmapOk = true;
-            setMethod("bitmap");
+            
           } catch(e1) {
             try {
               ctx.drawImage(video, 0, 0, w, h);
               bitmapOk = true;
-              setMethod("video");
+              
             } catch(e2) {
-              setMethod("draw-err");
+              
             }
           }
 
-          frameRef.current++;
-          setFrameCount(frameRef.current);
+          
+          
 
           if (bitmapOk) {
             let decoded = null;
@@ -354,9 +351,9 @@ function CameraScanner({ onScan, onClose, hint="" }) {
             }
           }
         } catch(e) {
-          setMethod("err:" + (e.message||"?").slice(0,15));
-          frameRef.current++;
-          setFrameCount(frameRef.current);
+          .slice(0,15));
+          
+          
         }
 
         if (!cancelled) loopRef.current = setTimeout(decode, 250);
@@ -383,7 +380,6 @@ function CameraScanner({ onScan, onClose, hint="" }) {
           <div style={{position:"absolute",top:8,left:0,right:0,textAlign:"center"}}>
             <span style={{background:"rgba(28,43,58,.75)",color:C.amber,fontSize:11,fontWeight:700,padding:"3px 12px",borderRadius:10}}>SCANNING</span>
           </div>
-          <div style={{position:"absolute",bottom:8,right:10,background:"rgba(0,0,0,.55)",borderRadius:6,padding:"2px 8px",fontSize:10,color:"#aaa",fontFamily:"monospace"}}>f:{frameCount} {method}</div>
         </>}
         {status==="starting"&&<div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,background:"rgba(0,0,0,.65)"}}>
           <div style={{width:36,height:36,border:`3px solid ${C.amber}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
@@ -399,9 +395,6 @@ function CameraScanner({ onScan, onClose, hint="" }) {
         </div>}
       </div>
       {hint&&<div style={{background:C.amberLight,border:`1px solid ${C.amberBdr}`,borderRadius:6,padding:"10px 14px",fontSize:12,color:C.warnText,display:"flex",gap:8,alignItems:"center"}}><span>💡</span><span>{hint}</span></div>}
-      <div style={{background:"#0D1520",borderRadius:8,padding:"10px 14px",fontSize:11,color:"#8A9BB0",fontFamily:"monospace",lineHeight:1.8}}>
-        <div>📷 {status}</div><div>🔢 frames: {frameCount}</div><div>⚙️ {method}</div><div>✅ {lastScan||"—"}</div>
-      </div>
       <Btn variant="outline" onClick={onClose} style={{justifyContent:"center"}}>Close Camera</Btn>
     </div>
   );
