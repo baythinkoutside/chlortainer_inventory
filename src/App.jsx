@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { BrowserMultiFormatReader } from "@zxing/browser";
+import { BrowserMultiFormatReader, RGBLuminanceSource, BinaryBitmap, HybridBinarizer } from "@zxing/library";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -334,7 +334,7 @@ function CameraScanner({ onScan, onClose, hint="" }) {
 
             if (!decoded) {
               try {
-                const { RGBLuminanceSource, BinaryBitmap, HybridBinarizer } = await import("@zxing/library");                const id = ctx.getImageData(0, 0, w, h);
+                const id = ctx.getImageData(0, 0, w, h);
                 const src = new RGBLuminanceSource(id.data, w, h);
                 const bmp2 = new BinaryBitmap(new HybridBinarizer(src));
                 const r = reader.decode(bmp2);

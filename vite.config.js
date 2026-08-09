@@ -7,12 +7,15 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
   },
   optimizeDeps: {
-    include: ["@zxing/browser", "@zxing/library"],
+    include: ["@zxing/library"],
     esbuildOptions: {
       target: "es2020",
     },
   },
   build: {
     target: "es2020",
+    commonjsOptions: {
+      include: [/@zxing\/library/, /node_modules/],
+    },
   },
 });
