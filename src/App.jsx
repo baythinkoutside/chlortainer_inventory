@@ -594,7 +594,7 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
         </div>
       </div>
       {mfgMatch&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:8,padding:12}}>
-        <div style={{fontSize:11,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Scanned via Manufacturer Barcode</div>
+        <div style={{fontSize:11,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Scanned via Product Barcode</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
           <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>UPC / Barcode</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{mfgMatch.barcode}</div></div>
           {sup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Supplier</div><div style={{fontSize:13,fontWeight:700,color:C.navy}}>{sup.name}</div></div>}
@@ -640,7 +640,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
     setNotFound("");
     const t=code.trim().toUpperCase();
     setLastScanned(code.trim());
-    // Check CT SKU first, then fall back to mfg barcode lookup
+    // Check CT SKU first, then fall back to product barcode lookup
     let part=parts.find(p=>p.id.toUpperCase()===t);
     if(!part){
       const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===t);
@@ -1048,7 +1048,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
         </div>}
       </div>
       <div>
-        <SectionTitle>Manufacturer Barcodes ({partMfgBarcodes.length})</SectionTitle>
+        <SectionTitle>Product Barcodes ({partMfgBarcodes.length})</SectionTitle>
         {partMfgBarcodes.map((mb,i)=>{
           const sup=suppliers.find(s=>s.id===mb.supplier_id);
           return <div key={i} style={{border:`1.5px solid ${C.border}`,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1062,10 +1062,10 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
         })}
         {/* Add barcode form */}
         <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:14,marginTop:6}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:10}}>+ Add Manufacturer Barcode</div>
+          <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:10}}>+ Add Product Barcode</div>
           {scanningBc
             ? <div style={{marginBottom:10}}>
-                <CameraScanner onScan={bc=>{setAddBcForm(f=>({...f,barcode:bc}));setScanningBc(false);}} onClose={()=>setScanningBc(false)} hint="Scan the manufacturer barcode"/>
+                <CameraScanner onScan={bc=>{setAddBcForm(f=>({...f,barcode:bc}));setScanningBc(false);}} onClose={()=>setScanningBc(false)} hint="Scan the product barcode"/>
               </div>
             : <Btn variant="outline" style={{width:"100%",justifyContent:"center",marginBottom:10}} onClick={()=>setScanningBc(true)}>📷 Scan Barcode</Btn>
           }
