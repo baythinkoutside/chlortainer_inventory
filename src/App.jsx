@@ -304,6 +304,23 @@ function useData() {
     await _sb.from("parts").insert({id,description:form.description,category:form.category,uom:form.uom,stock:+form.stock||0,min_stock:+form.minStock||0,location:form.location});
     await logAudit("part_add","part",id,{description:form.description,category:form.category,stock:+form.stock||0});
   }
+  async function uploadPartImage(partId, file) {
+    const ext = file.name.split('.').pop() || 'jpg';
+    const path = `${partId}.${ext}`;
+    // Remove old image first
+    await _sb.storage.from("part-images").remove([`${partId}.jpg`,`${partId}.jpeg`,`${partId}.png`,`${partId}.webp`]).catch(()=>{});
+    const { error } = await _sb.storage.from("part-images").upload(path, file, { upsert: true, contentType: file.type });
+    if (error) throw new Error(error.message);
+    const { data } = _sb.storage.from("part-images").getPublicUrl(path);
+    const url = data.publicUrl + `?t=${Date.now()}`; // cache bust
+    await _sb.from("parts").update({ image_url: url }).eq("id", partId);
+    await logAudit("image_upload","part",partId,{url});
+  }
+  async function removePartImage(partId) {
+    await _sb.storage.from("part-images").remove([`${partId}.jpg`,`${partId}.jpeg`,`${partId}.png`,`${partId}.webp`]).catch(()=>{});
+    await _sb.from("parts").update({ image_url: null }).eq("id", partId);
+    await logAudit("image_remove","part",partId,{});
+  }
   async function updateStock(partId,newStock,details={}){
     const part=parts.find(p=>p.id===partId);
     await _sb.from("parts").update({stock:newStock}).eq("id",partId);
@@ -345,7 +362,7 @@ function useData() {
     await logAudit("barcode_remove","part",mb?.part_id||"unknown",{barcode:mb?.barcode});
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode}};
+  return {parts,suppliers,lps,mfgBarcodes,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -767,7 +784,13 @@ function PartsTab({ parts, suppliers, mfgBarcodes, actions }) {
       {filtered.map(p=>(
         <div key={p.id} onClick={()=>setViewPart(p)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px",display:"flex",alignItems:"center",gap:16,cursor:"pointer",transition:"border-color .15s"}}
           onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
-          <div style={{flexShrink:0}}><BarcodeDisplay code={p.id}/></div>
+          <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+            {p.image_url
+              ? <img src={p.image_url} alt={p.id} style={{width:56,height:56,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`}}/>
+              : <div style={{width:56,height:56,borderRadius:6,border:`1.5px dashed ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,color:C.textLight}}>📷</div>
+            }
+            <BarcodeDisplay code={p.id}/>
+          </div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontWeight:700,fontSize:14,color:C.textDark,marginBottom:4}}>{p.description}</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -823,30 +846,63 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, actions, onClose
   async function deleteBc(id){setSaving(true);await actions.deleteMfgBarcode(id);setSaving(false);}
   const avail=suppliers.filter(s=>!live.suppliers?.find(x=>x.supplierId===s.id));
   const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
+  const [uploading,setUploading]=useState(false);
+  const imgInputRef=useRef(null);
+
+  async function handleImageUpload(e){
+    const file=e.target.files?.[0];
+    if(!file)return;
+    setUploading(true);
+    try{ await actions.uploadPartImage(live.id,file); }
+    catch(err){ alert("Upload failed: "+err.message); }
+    setUploading(false);
+    e.target.value="";
+  }
+
   return <Modal title={live.id} onClose={onClose}>
     <div style={{display:"grid",gap:20}}>
       <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"14px 0",background:C.offWhite,borderRadius:6,gap:10}}>
-        <BarcodeDisplay code={live.id} size="lg"/>
-        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
-          const w=window.open("","_blank");
-          w.document.write(`<!DOCTYPE html><html><head><title>${live.id}</title>
-            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-            <style>body{font-family:Arial,sans-serif;padding:20px;display:flex;justify-content:center;}
-            .label{border:1.5px solid #E0E3E7;border-radius:8px;padding:16px;width:300px;text-align:center;}
-            .bar{width:4px;height:20px;background:#F5A623;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:middle;}
-            h3{margin:0 0 4px;font-size:11px;color:#8A9BB0;text-transform:uppercase;letter-spacing:1px;}
-            p{margin:4px 0;font-size:12px;color:#1C2B3A;}
-            .meta{font-size:10px;color:#8A9BB0;margin-top:8px;}</style></head>
-            <body onload="window.print()"><div class="label">
-            <div><span class="bar"></span><strong style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#1C2B3A;">ChlorTainer</strong></div>
-            <svg id="bc"></svg>
-            <p><strong>${live.description}</strong></p>
-            <div class="meta">${live.category} · ${live.uom} · ${live.location||"—"}</div>
+        {/* Part image */}
+        {live.image_url
+          ? <div style={{position:"relative"}}>
+              <img src={live.image_url} alt={live.id} style={{width:180,height:140,objectFit:"cover",borderRadius:8,border:`1.5px solid ${C.border}`}}/>
+              <button onClick={async()=>{if(window.confirm("Remove image?")){ setUploading(true); await actions.removePartImage(live.id); setUploading(false);}}}
+                style={{position:"absolute",top:-8,right:-8,background:C.red,color:"#fff",border:"none",borderRadius:"50%",width:22,height:22,cursor:"pointer",fontSize:12,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
             </div>
-            <script>JsBarcode("#bc","${live.id}",{format:"CODE128",width:2,height:50,displayValue:true,fontSize:11,margin:4,lineColor:"#1C2B3A"});<\/script>
-            </body></html>`);
-          w.document.close();
-        }}>🖨️ Print Label</Btn>
+          : <div onClick={()=>imgInputRef.current?.click()}
+              style={{width:180,height:140,borderRadius:8,border:`2px dashed ${C.border}`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,cursor:"pointer",background:C.white}}>
+              <span style={{fontSize:32}}>📷</span>
+              <span style={{fontSize:11,color:C.textLight}}>Tap to add photo</span>
+            </div>
+        }
+        <input ref={imgInputRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleImageUpload}/>
+        <div style={{display:"flex",gap:8}}>
+          <Btn variant="outline" style={{padding:"5px 12px",fontSize:11}} onClick={()=>imgInputRef.current?.click()} disabled={uploading}>
+            {uploading?"Uploading…":(live.image_url?"🔄 Replace Photo":"📷 Add Photo")}
+          </Btn>
+          <Btn variant="outline" style={{padding:"5px 12px",fontSize:11}} onClick={()=>{
+            const imgTag=live.image_url?`<img src="${live.image_url}" style="width:100%;max-height:160px;object-fit:contain;border-radius:6px;margin-bottom:8px;"/>` : "";
+            const w=window.open("","_blank");
+            w.document.write(`<!DOCTYPE html><html><head><title>${live.id}</title>
+              <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
+              <style>body{font-family:Arial,sans-serif;padding:20px;display:flex;justify-content:center;}
+              .label{border:1.5px solid #E0E3E7;border-radius:8px;padding:16px;width:300px;text-align:center;}
+              .bar{width:4px;height:20px;background:#F5A623;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:middle;}
+              p{margin:4px 0;font-size:12px;color:#1C2B3A;}
+              .meta{font-size:10px;color:#8A9BB0;margin-top:8px;}</style></head>
+              <body onload="window.print()"><div class="label">
+              <div><span class="bar"></span><strong style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#1C2B3A;">ChlorTainer</strong></div>
+              ${imgTag}
+              <svg id="bc"></svg>
+              <p><strong>${live.description}</strong></p>
+              <div class="meta">${live.category} · ${live.uom} · ${live.location||"—"}</div>
+              </div>
+              <script>JsBarcode("#bc","${live.id}",{format:"CODE128",width:2,height:50,displayValue:true,fontSize:11,margin:4,lineColor:"#1C2B3A"});<\/script>
+              </body></html>`);
+            w.document.close();
+          }}>🖨️ Print Label</Btn>
+        </div>
+        <BarcodeDisplay code={live.id} size="lg"/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         {[["Description",live.description],["Category",<Badge color="navy">{live.category}</Badge>],
@@ -1086,7 +1142,7 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
         <BarcodeDisplay code={lp.id} size="lg"/>
         <div style={{display:"flex",gap:8}}><Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge><Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge></div>
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
-          const itemBlocks=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `<div class="item"><div class="item-header"><span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg></div>`;}).join("");
+          const itemBlocks=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");const imgTag=p?.image_url?`<img src="${p.image_url}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid #E0E3E7;float:right;margin-left:10px;"/>` : "";return `<div class="item"><div class="item-header">${imgTag}<span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg><div style="clear:both"></div></div>`;}).join("");
           const bcScripts=(lp.items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
           const w=window.open("","_blank");
           w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
