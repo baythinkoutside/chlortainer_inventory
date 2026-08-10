@@ -775,6 +775,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, actions, onClose
             <Btn disabled={saving} onClick={addSup}>{saving?"Saving…":"Add Supplier Link"}</Btn>
           </div>
         </div>}
+      </div>
       <div>
         <SectionTitle>Manufacturer Barcodes ({partMfgBarcodes.length})</SectionTitle>
         {partMfgBarcodes.map((mb,i)=>{
