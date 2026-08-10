@@ -25,7 +25,24 @@ async function initSB(url, key) {
   return _sb;
 }
 
-// ─── Brand Tokens ─────────────────────────────────────────────────────────────
+// ─── Current User ─────────────────────────────────────────────────────────────
+let _currentUser = null;
+function getCurrentUser() { return _currentUser; }
+function setCurrentUser(u) { _currentUser = u; }
+
+// Write to audit log — call after any data change
+async function logAudit(action, entityType, entityId, details={}) {
+  try {
+    const u = getCurrentUser();
+    await _sb.from("audit_log").insert({
+      user_id: u?.id || null,
+      user_email: u?.email || "unknown",
+      action, entity_type: entityType, entity_id: entityId,
+      details,
+    });
+  } catch(_) {} // never block the main action
+}
+
 const C = {
   navy:"#1C2B3A", navyLight:"#2C3E50",
   red:"#C8102E", redLight:"#FFF0F2", redBorder:"#F5A0AE",
@@ -179,6 +196,64 @@ insert into part_suppliers(part_id,supplier_id,mfg_part_no,lead_days,unit_cost) 
   );
 }
 
+// ─── Login Screen ─────────────────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState("");
+
+  async function login(){
+    if(!email||!password) return;
+    setLoading(true); setErr("");
+    try {
+      const {data,error} = await _sb.auth.signInWithPassword({email:email.trim(),password});
+      if(error) throw new Error(error.message);
+      setCurrentUser(data.user);
+      onLogin(data.user);
+    } catch(e){ setErr(e.message); setLoading(false); }
+  }
+
+  return (
+    <div style={{minHeight:"100vh",background:C.offWhite,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:400}}>
+        <div style={{background:C.navy,borderBottom:`4px solid ${C.amber}`,borderRadius:"10px 10px 0 0",padding:"24px 28px",display:"flex",alignItems:"center",gap:10}}>
+          <div style={{background:C.amber,width:5,height:36,borderRadius:2}}/>
+          <div>
+            <div style={{fontSize:20,fontWeight:900,color:C.white}}>ChlorTainer</div>
+            <div style={{fontSize:10,fontWeight:700,color:C.amber,letterSpacing:2.5,textTransform:"uppercase"}}>Inventory System</div>
+          </div>
+        </div>
+        <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderTop:"none",borderRadius:"0 0 10px 10px",padding:28}}>
+          <div style={{fontSize:15,fontWeight:700,color:C.navy,marginBottom:20}}>Sign in to continue</div>
+          <div style={{display:"grid",gap:14}}>
+            <Field label="Email">
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&login()}
+                placeholder="you@chlortainer.com"
+                style={{...inputStyle,width:"100%"}}/>
+            </Field>
+            <Field label="Password">
+              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&login()}
+                placeholder="••••••••"
+                style={{...inputStyle,width:"100%"}}/>
+            </Field>
+          </div>
+          {err&&<div style={{marginTop:12,background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ {err}</div>}
+          <Btn onClick={login} disabled={!email||!password||loading}
+            style={{width:"100%",justifyContent:"center",marginTop:16}}>
+            {loading?"Signing in…":"Sign In"}
+          </Btn>
+          <p style={{fontSize:11,color:C.textLight,margin:"12px 0 0",textAlign:"center"}}>
+            Contact your administrator to reset your password.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Data Hook ────────────────────────────────────────────────────────────────
 function useData() {
   const [parts,setParts]=useState([]);
@@ -227,28 +302,48 @@ function useData() {
   async function addPart(form){
     const id=`CT-BC-${String(parts.length+1).padStart(4,"0")}`;
     await _sb.from("parts").insert({id,description:form.description,category:form.category,uom:form.uom,stock:+form.stock||0,min_stock:+form.minStock||0,location:form.location});
+    await logAudit("part_add","part",id,{description:form.description,category:form.category,stock:+form.stock||0});
   }
-  async function updateStock(partId,newStock){await _sb.from("parts").update({stock:newStock}).eq("id",partId);}
+  async function updateStock(partId,newStock,details={}){
+    const part=parts.find(p=>p.id===partId);
+    await _sb.from("parts").update({stock:newStock}).eq("id",partId);
+    await logAudit("stock_adjust","part",partId,{from:part?.stock,to:newStock,...details});
+  }
   async function addSupplier(form){
     const id=`SUP-${String(suppliers.length+1).padStart(3,"0")}`;
     await _sb.from("suppliers").insert({id,name:form.name,contact:form.contact,phone:form.phone});
+    await logAudit("supplier_add","supplier",id,{name:form.name});
   }
   async function linkSupplier(partId,form){
     await _sb.from("part_suppliers").upsert({part_id:partId,supplier_id:form.supplierId,mfg_part_no:form.mfgPartNo,lead_days:+form.leadDays||0,unit_cost:+form.unitCost||0});
+    await logAudit("supplier_link","part",partId,{supplier_id:form.supplierId,mfg_part_no:form.mfgPartNo});
   }
-  async function unlinkSupplier(partId,supplierId){await _sb.from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);}
+  async function unlinkSupplier(partId,supplierId){
+    await _sb.from("part_suppliers").delete().eq("part_id",partId).eq("supplier_id",supplierId);
+    await logAudit("supplier_unlink","part",partId,{supplier_id:supplierId});
+  }
   async function createLP(form,items){
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
     await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items});
+    await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,items});
     return id;
   }
-  async function updateLPStatus(lpId,status){await _sb.from("license_plates").update({status}).eq("id",lpId);}
+  async function updateLPStatus(lpId,status){
+    const lp=lps.find(l=>l.id===lpId);
+    await _sb.from("license_plates").update({status}).eq("id",lpId);
+    await logAudit("lp_status","license_plate",lpId,{from:lp?.status,to:status});
+  }
   async function addMfgBarcode(partId,supplierId,barcode,description){
     await _sb.from("mfg_barcodes").insert({part_id:partId,supplier_id:supplierId||null,barcode:barcode.trim(),description:description||null});
+    await logAudit("barcode_add","part",partId,{barcode,supplier_id:supplierId});
   }
-  async function deleteMfgBarcode(id){await _sb.from("mfg_barcodes").delete().eq("id",id);}
+  async function deleteMfgBarcode(id){
+    const mb=mfgBarcodes.find(m=>m.id===id);
+    await _sb.from("mfg_barcodes").delete().eq("id",id);
+    await logAudit("barcode_remove","part",mb?.part_id||"unknown",{barcode:mb?.barcode});
+  }
 
   return {parts,suppliers,lps,mfgBarcodes,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode}};
 }
@@ -432,8 +527,11 @@ function LookupResult({ result, parts, suppliers, onClear }) {
 }
 
 // ─── Receive Result ───────────────────────────────────────────────────────────
-function ReceiveResult({ result, parts, receiveQty, setReceiveQty, saving, onBack, onConfirm }) {
+function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, receiveQty, setReceiveQty, saving, onBack, onConfirm }) {
   const live=parts.find(x=>x.id===result.data.id)||result.data;
+  const mfgMatch=lastScanned?mfgBarcodes.find(m=>m.barcode.toUpperCase()===lastScanned.toUpperCase()):null;
+  const sup=mfgMatch?suppliers.find(s=>s.id===mfgMatch.supplier_id):null;
+  const partSup=sup?live.suppliers?.find(s=>s.supplierId===sup.id):null;
   return (
     <div style={{display:"grid",gap:14}}>
       <div style={{background:C.white,border:`2px solid ${C.amber}`,borderRadius:8,padding:16}}>
@@ -445,6 +543,15 @@ function ReceiveResult({ result, parts, receiveQty, setReceiveQty, saving, onBac
           <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Location</div><div style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location}</div></div>
         </div>
       </div>
+      {mfgMatch&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:8,padding:12}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Scanned via Manufacturer Barcode</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>UPC / Barcode</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{mfgMatch.barcode}</div></div>
+          {sup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Supplier</div><div style={{fontSize:13,fontWeight:700,color:C.navy}}>{sup.name}</div></div>}
+          {partSup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Unit Cost</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.greenText}}>${partSup.unitCost?.toFixed(2)}</div></div>}
+          {partSup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Lead Time</div><div style={{fontSize:13,color:C.navy}}>{partSup.leadDays}d</div></div>}
+        </div>
+      </div>}
       <Field label="Quantity Received">
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <button onClick={()=>setReceiveQty(q=>Math.max(1,+q-1))} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
@@ -454,6 +561,7 @@ function ReceiveResult({ result, parts, receiveQty, setReceiveQty, saving, onBac
       </Field>
       <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.greenText}}>
         New stock total: <strong>{live.stock+(+receiveQty)} {live.uom}</strong>
+        {partSup&&<span style={{marginLeft:12}}>· Receipt value: <strong>${(+receiveQty*partSup.unitCost).toFixed(2)}</strong></span>}
       </div>
       <div style={{display:"flex",gap:10}}>
         <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={onBack}>← Back</Btn>
@@ -469,6 +577,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
   const [result,setResult]=useState(null);
   const [notFound,setNotFound]=useState("");
   const [receiveQty,setReceiveQty]=useState(1);
+  const [lastScanned,setLastScanned]=useState("");
   const [shipItems,setShipItems]=useState([]);
   const [shipDest,setShipDest]=useState("");
   const [shipType,setShipType]=useState("Outbound");
@@ -480,6 +589,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
   function handleScan(code){
     setNotFound("");
     const t=code.trim().toUpperCase();
+    setLastScanned(code.trim());
     // Check CT SKU first, then fall back to mfg barcode lookup
     let part=parts.find(p=>p.id.toUpperCase()===t);
     if(!part){
@@ -502,9 +612,17 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
     if(!result||result.type!=="part")return;
     setSaving(true);
     const live=parts.find(p=>p.id===result.data.id);
-    await actions.updateStock(live.id,live.stock+(+receiveQty));
+    const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===lastScanned.toUpperCase());
+    const sup=mfgMatch?suppliers.find(s=>s.id===mfgMatch.supplier_id):null;
+    await actions.updateStock(live.id,live.stock+(+receiveQty),{
+      qty_received:+receiveQty,
+      supplier_id:sup?.id||null,
+      supplier_name:sup?.name||null,
+      upc:mfgMatch?.barcode||null,
+      source:"receive",
+    });
     showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id}`);
-    setSaving(false);setResult(null);setReceiveQty(1);
+    setSaving(false);setResult(null);setReceiveQty(1);setLastScanned("");
   }
 
   async function createShipment(){
@@ -595,7 +713,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
         <ManualEntry onSubmit={handleScan}/>
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
-      {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
+      {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
 
       {mode==="ship"&&<div style={{display:"grid",gap:14}}>
         <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14}}>
@@ -1032,9 +1150,9 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
 }
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
-function MainApp() {
+function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,loading,error,actions}=useData();
+  const {parts,suppliers,lps,mfgBarcodes,loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
@@ -1042,6 +1160,7 @@ function MainApp() {
     {id:"suppliers",label:"Suppliers",icon:"🏭"},
     {id:"inventory",label:"Inventory",icon:"📦"},
     {id:"lp",label:"License Plates",icon:"🏷️"},
+    {id:"audit",label:"Audit Log",icon:"📋"},
   ];
   return (
     <div style={{minHeight:"100vh",background:C.offWhite}}>
@@ -1057,6 +1176,10 @@ function MainApp() {
               {loading?<span style={{fontSize:11,color:C.textLight}}>Syncing…</span>
                 :<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.greenText,background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:12,padding:"3px 10px",fontWeight:700}}>🟢 Live</div>}
               {alerts>0&&<div style={{background:C.amber,color:C.navy,borderRadius:20,padding:"4px 12px",fontSize:12,fontWeight:800}}>⚠ {alerts} Low Stock</div>}
+              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end"}}>
+                <span style={{fontSize:11,color:C.amber,fontWeight:700}}>{user?.email}</span>
+                <button onClick={onSignOut} style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:C.textLight,padding:0}}>Sign out</button>
+              </div>
               <button onClick={()=>{clearConfig();window.location.reload();}} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:C.textLight,padding:"4px 8px"}}>⚙ DB</button>
             </div>
           </div>
@@ -1084,6 +1207,7 @@ function MainApp() {
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} actions={actions}/>
+          :tab==="audit"?<AuditLogTab/>
           :null}
       </div>
       <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 20px",textAlign:"center",background:C.white}}>
@@ -1093,8 +1217,90 @@ function MainApp() {
   );
 }
 
+// ─── Audit Log Tab ────────────────────────────────────────────────────────────
+function AuditLogTab() {
+  const [logs,setLogs]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [filterAction,setFilterAction]=useState("All");
+  const [filterUser,setFilterUser]=useState("All");
+
+  useEffect(()=>{
+    (async()=>{
+      const {data}=await _sb.from("audit_log").select("*").order("created_at",{ascending:false}).limit(200);
+      setLogs(data||[]);
+      setLoading(false);
+    })();
+  },[]);
+
+  const actionLabels={
+    stock_adjust:"Stock Adjust",part_add:"Part Added",supplier_add:"Supplier Added",
+    supplier_link:"Supplier Linked",supplier_unlink:"Supplier Unlinked",
+    lp_create:"LP Created",lp_status:"LP Status",barcode_add:"Barcode Added",barcode_remove:"Barcode Removed",
+  };
+  const actionColors={
+    stock_adjust:"green",part_add:"blue",supplier_add:"blue",supplier_link:"navy",
+    supplier_unlink:"red",lp_create:"amber",lp_status:"amber",barcode_add:"navy",barcode_remove:"red",
+  };
+
+  const users=[...new Set(logs.map(l=>l.user_email))].filter(Boolean);
+  const actions=[...new Set(logs.map(l=>l.action))].filter(Boolean);
+  const filtered=logs.filter(l=>
+    (filterAction==="All"||l.action===filterAction)&&
+    (filterUser==="All"||l.user_email===filterUser)
+  );
+
+  if(loading) return <Spinner text="Loading audit log…"/>;
+
+  return (
+    <div>
+      <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
+        <select value={filterAction} onChange={e=>setFilterAction(e.target.value)} style={inputStyle}>
+          <option>All</option>
+          {actions.map(a=><option key={a} value={a}>{actionLabels[a]||a}</option>)}
+        </select>
+        <select value={filterUser} onChange={e=>setFilterUser(e.target.value)} style={inputStyle}>
+          <option>All</option>
+          {users.map(u=><option key={u} value={u}>{u}</option>)}
+        </select>
+        <span style={{fontSize:12,color:C.textLight,marginLeft:"auto"}}>{filtered.length} records</span>
+      </div>
+      <div style={{display:"grid",gap:8}}>
+        {filtered.map((log,i)=>{
+          const color=actionColors[log.action]||"gray";
+          const ts=new Date(log.created_at);
+          return (
+            <div key={i} style={{background:C.white,border:`1.5px solid ${C.border}`,borderLeft:`4px solid ${color==="green"?C.greenText:color==="red"?C.red:color==="amber"?C.amber:C.navy}`,borderRadius:7,padding:"12px 16px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <Badge color={color}>{actionLabels[log.action]||log.action}</Badge>
+                  <span style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:C.navy}}>{log.entity_id}</span>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:11,color:C.textMid,fontWeight:600}}>{log.user_email}</div>
+                  <div style={{fontSize:10,color:C.textLight}}>{ts.toLocaleDateString()} {ts.toLocaleTimeString()}</div>
+                </div>
+              </div>
+              {log.details&&Object.keys(log.details).length>0&&(
+                <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:6}}>
+                  {Object.entries(log.details).filter(([,v])=>v!==null&&v!==undefined).map(([k,v])=>(
+                    <span key={k} style={{background:C.offWhite,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 8px",fontSize:11,color:C.textMid}}>
+                      <strong>{k}:</strong> {typeof v==="object"?JSON.stringify(v):String(v)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {filtered.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No audit records found.</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [config,setConfig]=useState(()=>loadConfig());
+  const [user,setUser]=useState(null);
 
   if (!config) {
     return <SetupScreen onConnected={async()=>{
@@ -1104,20 +1310,31 @@ export default function App() {
     }}/>;
   }
 
-  return <SupabaseLoader config={config} onDisconnect={()=>{clearConfig();setConfig(null);}}/>;
+  return <SupabaseLoader config={config} user={user} setUser={setUser} onDisconnect={()=>{clearConfig();setConfig(null);}}/>;
 }
 
-function SupabaseLoader({ config, onDisconnect }) {
+function SupabaseLoader({ config, user, setUser, onDisconnect }) {
   const [ready,setReady]=useState(false);
   const [err,setErr]=useState(null);
 
   useEffect(()=>{
-    initSB(config.url,config.key)
-      .then(()=>setReady(true))
-      .catch(e=>setErr(e.message));
+    initSB(config.url,config.key).then(sb=>{
+      // Check for existing session
+      sb.auth.getSession().then(({data:{session}})=>{
+        if(session?.user){ setCurrentUser(session.user); setUser(session.user); }
+        setReady(true);
+      });
+    }).catch(e=>setErr(e.message));
   },[]);
+
+  async function handleSignOut(){
+    await _sb.auth.signOut();
+    setCurrentUser(null);
+    setUser(null);
+  }
 
   if (err) return <div style={{padding:40,textAlign:"center",color:C.red}}>❌ Failed to connect: {err}<br/><button onClick={onDisconnect} style={{marginTop:16,padding:"8px 16px",cursor:"pointer"}}>Reconnect</button></div>;
   if (!ready) return <Spinner text="Connecting to Supabase…"/>;
-  return <MainApp/>;
+  if (!user) return <LoginScreen onLogin={u=>{ setCurrentUser(u); setUser(u); }}/>;
+  return <MainApp user={user} onSignOut={handleSignOut}/>;
 }
