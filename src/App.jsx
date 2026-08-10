@@ -1291,7 +1291,7 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,mfgBarcodes,loading,error,actions}=useData();
+  const {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
