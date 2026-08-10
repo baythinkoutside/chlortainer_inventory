@@ -260,17 +260,19 @@ function useData() {
   const [suppliers,setSuppliers]=useState([]);
   const [lps,setLps]=useState([]);
   const [mfgBarcodes,setMfgBarcodes]=useState([]);
+  const [supplierStock,setSupplierStock]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
   const fetchAll = async () => {
     const sb = _sb;
-    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes}] = await Promise.all([
+    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
       sb.from("license_plates").select("*").order("created_at",{ascending:false}),
       sb.from("mfg_barcodes").select("*").order("created_at",{ascending:false}),
+      sb.from("supplier_stock").select("*"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
@@ -278,6 +280,7 @@ function useData() {
     setParts(stitched);
     setLps((plates||[]).map(lp=>({...lp,createdAt:lp.created_at,items:lp.items||[]})));
     setMfgBarcodes(barcodes||[]);
+    setSupplierStock(supStock||[]);
   };
 
   useEffect(()=>{
@@ -293,6 +296,7 @@ function useData() {
           _sb.channel("l").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
           _sb.channel("lp").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
           _sb.channel("mb").on("postgres_changes",{event:"*",schema:"public",table:"mfg_barcodes"},refresh).subscribe(),
+          _sb.channel("ss").on("postgres_changes",{event:"*",schema:"public",table:"supplier_stock"},refresh).subscribe(),
         ];
       } catch(e){setError(e.message);setLoading(false);}
     })();
@@ -362,7 +366,22 @@ function useData() {
     await logAudit("barcode_remove","part",mb?.part_id||"unknown",{barcode:mb?.barcode});
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
+  // Adjust stock per supplier — updates supplier_stock rows then recalculates parts.stock total
+  async function adjustSupplierStock(partId, adjustments) {
+    for (const adj of adjustments) {
+      await _sb.from("supplier_stock").upsert(
+        {part_id:partId, supplier_id:adj.supplierId, qty:Math.max(0,adj.qty), updated_at:new Date().toISOString()},
+        {onConflict:"part_id,supplier_id"}
+      );
+    }
+    const {data:rows} = await _sb.from("supplier_stock").select("qty").eq("part_id",partId);
+    const total = (rows||[]).reduce((sum,r)=>sum+(r.qty||0),0);
+    await _sb.from("parts").update({stock:total}).eq("id",partId);
+    const part=parts.find(p=>p.id===partId);
+    await logAudit("stock_adjust","part",partId,{from:part?.stock,to:total,adjustments,source:"supplier_split"});
+  }
+
+  return {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -762,7 +781,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
 }
 
 // ─── Parts Tab ────────────────────────────────────────────────────────────────
-function PartsTab({ parts, suppliers, mfgBarcodes, actions }) {
+function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("All");
   const [showAdd,setShowAdd]=useState(false);
@@ -826,28 +845,49 @@ function PartsTab({ parts, suppliers, mfgBarcodes, actions }) {
         </div>
       </div>
     </Modal>}
-    {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} actions={actions} onClose={()=>setViewPart(null)}/>}
+    {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions} onClose={()=>setViewPart(null)}/>}
   </div>;
 }
 
-function PartDetailModal({ part, suppliers, parts, mfgBarcodes, actions, onClose }) {
+function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, actions, onClose }) {
   const live=parts.find(x=>x.id===part.id)||part;
   const partMfgBarcodes=mfgBarcodes.filter(m=>m.part_id===live.id);
+  const partSupplierStock=supplierStock.filter(s=>s.part_id===live.id);
   const [addSupForm,setAddSupForm]=useState({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});
   const [addBcForm,setAddBcForm]=useState({barcode:"",supplierId:"",description:""});
   const [editStock,setEditStock]=useState(false);
-  const [stockAdj,setStockAdj]=useState(0);
+  const [supQtys,setSupQtys]=useState({});
   const [saving,setSaving]=useState(false);
   const [scanningBc,setScanningBc]=useState(false);
-  async function adjustStock(){setSaving(true);await actions.updateStock(live.id,Math.max(0,live.stock+(+stockAdj)));setSaving(false);setEditStock(false);setStockAdj(0);}
+  const [uploading,setUploading]=useState(false);
+  const imgInputRef=useRef(null);
+
+  // Initialize qty inputs from existing supplier_stock when opening adjust panel
+  function openAdjust(){
+    const init={};
+    (live.suppliers||[]).forEach(s=>{
+      const existing=partSupplierStock.find(r=>r.supplier_id===s.supplierId);
+      init[s.supplierId]=existing?existing.qty:0;
+    });
+    setSupQtys(init);
+    setEditStock(true);
+  }
+
+  async function applySupplierAdj(){
+    if(!Object.keys(supQtys).length) return;
+    setSaving(true);
+    const adjustments=Object.entries(supQtys).map(([supplierId,qty])=>({supplierId,qty:+qty||0}));
+    await actions.adjustSupplierStock(live.id, adjustments);
+    setSaving(false);
+    setEditStock(false);
+  }
+
   async function addSup(){if(!addSupForm.supplierId||!addSupForm.mfgPartNo)return;setSaving(true);await actions.linkSupplier(live.id,addSupForm);setSaving(false);setAddSupForm({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});}
   async function removeSup(sid){setSaving(true);await actions.unlinkSupplier(live.id,sid);setSaving(false);}
   async function addBc(){if(!addBcForm.barcode)return;setSaving(true);try{await actions.addMfgBarcode(live.id,addBcForm.supplierId||null,addBcForm.barcode,addBcForm.description);}catch(e){alert("Barcode already exists: "+addBcForm.barcode);}setSaving(false);setAddBcForm({barcode:"",supplierId:"",description:""});setScanningBc(false);}
   async function deleteBc(id){setSaving(true);await actions.deleteMfgBarcode(id);setSaving(false);}
   const avail=suppliers.filter(s=>!live.suppliers?.find(x=>x.supplierId===s.id));
   const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
-  const [uploading,setUploading]=useState(false);
-  const imgInputRef=useRef(null);
 
   async function handleImageUpload(e){
     const file=e.target.files?.[0];
@@ -912,18 +952,61 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, actions, onClose
       <div style={{background:C.offWhite,borderRadius:7,padding:16,border:`1px solid ${C.border}`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
           <SectionTitle>Inventory</SectionTitle>
-          <Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} onClick={()=>setEditStock(v=>!v)}>Adjust Stock</Btn>
+          <Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} onClick={openAdjust} disabled={!live.suppliers?.length}>
+            {live.suppliers?.length?"Adjust Stock":"Add Supplier First"}
+          </Btn>
         </div>
-        <div style={{display:"flex",gap:24,alignItems:"center"}}>
-          <div><div style={{fontFamily:"monospace",fontSize:30,fontWeight:700,color:C.navy}}>{live.stock}</div><div style={{fontSize:11,color:C.textLight}}>on hand</div></div>
+        <div style={{display:"flex",gap:24,alignItems:"center",marginBottom:12}}>
+          <div><div style={{fontFamily:"monospace",fontSize:30,fontWeight:700,color:C.navy}}>{live.stock}</div><div style={{fontSize:11,color:C.textLight}}>total on hand</div></div>
           <div><div style={{fontFamily:"monospace",fontSize:18,color:C.textMid}}>{live.minStock}</div><div style={{fontSize:11,color:C.textLight}}>minimum</div></div>
           <Badge color={sc}>{live.stock===0?"Out of Stock":live.stock<live.minStock?"Low Stock":"In Stock"}</Badge>
         </div>
-        {editStock&&<div style={{display:"flex",gap:8,marginTop:12,alignItems:"center"}}>
-          <input type="number" value={stockAdj} onChange={e=>setStockAdj(e.target.value)} placeholder="±qty" style={{...inputStyle,width:80,fontFamily:"monospace"}}/>
-          <span style={{fontSize:12,color:C.textMid}}>New: {Math.max(0,live.stock+(+stockAdj))} {live.uom}</span>
-          <Btn style={{padding:"7px 14px",fontSize:12}} disabled={saving} onClick={adjustStock}>{saving?"…":"Apply"}</Btn>
-        </div>}
+        {/* Per-supplier stock breakdown */}
+        {partSupplierStock.length>0&&!editStock&&(
+          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+            <div style={{fontSize:10,fontWeight:700,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Stock by Supplier</div>
+            {partSupplierStock.map((row,i)=>{
+              const sup=suppliers.find(s=>s.id===row.supplier_id);
+              return <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 0",borderBottom:i<partSupplierStock.length-1?`1px solid ${C.border}`:"none"}}>
+                <span style={{fontSize:13,color:C.navy,fontWeight:600}}>{sup?.name||row.supplier_id}</span>
+                <span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{row.qty} <span style={{fontSize:11,color:C.textLight}}>{live.uom}</span></span>
+              </div>;
+            })}
+          </div>
+        )}
+        {/* Adjust panel — per-supplier qty inputs */}
+        {editStock&&(
+          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12,marginTop:4}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:10}}>Set quantity on hand by supplier:</div>
+            {(live.suppliers||[]).map((s,i)=>{
+              const sup=suppliers.find(x=>x.id===s.supplierId);
+              const existing=partSupplierStock.find(r=>r.supplier_id===s.supplierId);
+              return <div key={i} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:12,fontWeight:700,color:C.navy}}>{sup?.name}</div>
+                  <div style={{fontSize:10,color:C.textLight}}>{s.mfgPartNo} · ${(+s.unitCost).toFixed(2)}/{live.uom}</div>
+                  {existing&&<div style={{fontSize:10,color:C.textMid}}>Current: {existing.qty} {live.uom}</div>}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <button onClick={()=>setSupQtys(q=>({...q,[s.supplierId]:Math.max(0,(+q[s.supplierId]||0)-1)}))}
+                    style={{width:32,height:32,borderRadius:5,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer",fontSize:16}}>−</button>
+                  <input type="number" min="0" value={supQtys[s.supplierId]??existing?.qty??0}
+                    onChange={e=>setSupQtys(q=>({...q,[s.supplierId]:+e.target.value||0}))}
+                    style={{...inputStyle,width:70,textAlign:"center",fontFamily:"monospace",fontWeight:700,fontSize:15}}/>
+                  <button onClick={()=>setSupQtys(q=>({...q,[s.supplierId]:(+q[s.supplierId]||0)+1}))}
+                    style={{width:32,height:32,borderRadius:5,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer",fontSize:16}}>+</button>
+                </div>
+              </div>;
+            })}
+            <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"8px 12px",fontSize:13,color:C.greenText,marginBottom:10}}>
+              New total: <strong>{Object.values(supQtys).reduce((a,b)=>a+(+b||0),0)} {live.uom}</strong>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={()=>setEditStock(false)}>Cancel</Btn>
+              <Btn style={{flex:1,justifyContent:"center"}} disabled={saving} onClick={applySupplierAdj}>{saving?"Saving…":"✅ Apply Adjustment"}</Btn>
+            </div>
+          </div>
+        )}
       </div>
       <div>
         <SectionTitle>Suppliers ({live.suppliers?.length||0})</SectionTitle>
@@ -1259,7 +1342,7 @@ function MainApp({ user, onSignOut }) {
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ {error}</div>}
         {loading?<Spinner text="Loading from Supabase…"/>
           :tab==="scan"?<ScanTab parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
-          :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} actions={actions}/>
