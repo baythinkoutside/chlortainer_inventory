@@ -184,22 +184,25 @@ function useData() {
   const [parts,setParts]=useState([]);
   const [suppliers,setSuppliers]=useState([]);
   const [lps,setLps]=useState([]);
+  const [mfgBarcodes,setMfgBarcodes]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
   const fetchAll = async () => {
     const sb = _sb;
-    const [{data:sups},{data:rawParts},{data:links},{data:plates}] = await Promise.all([
+    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
       sb.from("license_plates").select("*").order("created_at",{ascending:false}),
+      sb.from("mfg_barcodes").select("*").order("created_at",{ascending:false}),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
     setSuppliers(sups||[]);
     setParts(stitched);
     setLps((plates||[]).map(lp=>({...lp,createdAt:lp.created_at,items:lp.items||[]})));
+    setMfgBarcodes(barcodes||[]);
   };
 
   useEffect(()=>{
@@ -214,6 +217,7 @@ function useData() {
           _sb.channel("s").on("postgres_changes",{event:"*",schema:"public",table:"suppliers"},refresh).subscribe(),
           _sb.channel("l").on("postgres_changes",{event:"*",schema:"public",table:"part_suppliers"},refresh).subscribe(),
           _sb.channel("lp").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
+          _sb.channel("mb").on("postgres_changes",{event:"*",schema:"public",table:"mfg_barcodes"},refresh).subscribe(),
         ];
       } catch(e){setError(e.message);setLoading(false);}
     })();
@@ -241,8 +245,12 @@ function useData() {
     return id;
   }
   async function updateLPStatus(lpId,status){await _sb.from("license_plates").update({status}).eq("id",lpId);}
+  async function addMfgBarcode(partId,supplierId,barcode,description){
+    await _sb.from("mfg_barcodes").insert({part_id:partId,supplier_id:supplierId||null,barcode:barcode.trim(),description:description||null});
+  }
+  async function deleteMfgBarcode(id){await _sb.from("mfg_barcodes").delete().eq("id",id);}
 
-  return {parts,suppliers,lps,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus}};
+  return {parts,suppliers,lps,mfgBarcodes,loading,error,actions:{addPart,updateStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -456,7 +464,7 @@ function ReceiveResult({ result, parts, receiveQty, setReceiveQty, saving, onBac
 }
 
 // ─── Scan Tab ─────────────────────────────────────────────────────────────────
-function ScanTab({ parts, suppliers, lps, actions }) {
+function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
   const [mode,setMode]=useState(null);
   const [result,setResult]=useState(null);
   const [notFound,setNotFound]=useState("");
@@ -472,13 +480,17 @@ function ScanTab({ parts, suppliers, lps, actions }) {
   function handleScan(code){
     setNotFound("");
     const t=code.trim().toUpperCase();
+    // Check CT SKU first, then fall back to mfg barcode lookup
+    let part=parts.find(p=>p.id.toUpperCase()===t);
+    if(!part){
+      const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===t);
+      if(mfgMatch) part=parts.find(p=>p.id===mfgMatch.part_id);
+    }
     if(mode==="lookup"||mode==="receive"){
-      const part=parts.find(p=>p.id.toUpperCase()===t);
-      if(part)setResult({type:"part",data:part});
+      if(part) setResult({type:"part",data:part});
       else setNotFound(t);
     }
     if(mode==="ship"){
-      const part=parts.find(p=>p.id.toUpperCase()===t);
       const lp=lps.find(l=>l.id.toUpperCase()===t);
       if(part){if(!shipItems.find(i=>i.partId===part.id)){setShipItems(prev=>[...prev,{partId:part.id,qty:1}]);showToast(`Added ${part.id}`);}else showToast(`${part.id} already in list`);}
       else if(lp)setResult({type:"lp",data:lp});
@@ -615,7 +627,7 @@ function ScanTab({ parts, suppliers, lps, actions }) {
 }
 
 // ─── Parts Tab ────────────────────────────────────────────────────────────────
-function PartsTab({ parts, suppliers, actions }) {
+function PartsTab({ parts, suppliers, mfgBarcodes, actions }) {
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("All");
   const [showAdd,setShowAdd]=useState(false);
@@ -673,19 +685,24 @@ function PartsTab({ parts, suppliers, actions }) {
         </div>
       </div>
     </Modal>}
-    {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} actions={actions} onClose={()=>setViewPart(null)}/>}
+    {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} actions={actions} onClose={()=>setViewPart(null)}/>}
   </div>;
 }
 
-function PartDetailModal({ part, suppliers, parts, actions, onClose }) {
+function PartDetailModal({ part, suppliers, parts, mfgBarcodes, actions, onClose }) {
   const live=parts.find(x=>x.id===part.id)||part;
+  const partMfgBarcodes=mfgBarcodes.filter(m=>m.part_id===live.id);
   const [addSupForm,setAddSupForm]=useState({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});
+  const [addBcForm,setAddBcForm]=useState({barcode:"",supplierId:"",description:""});
   const [editStock,setEditStock]=useState(false);
   const [stockAdj,setStockAdj]=useState(0);
   const [saving,setSaving]=useState(false);
+  const [scanningBc,setScanningBc]=useState(false);
   async function adjustStock(){setSaving(true);await actions.updateStock(live.id,Math.max(0,live.stock+(+stockAdj)));setSaving(false);setEditStock(false);setStockAdj(0);}
   async function addSup(){if(!addSupForm.supplierId||!addSupForm.mfgPartNo)return;setSaving(true);await actions.linkSupplier(live.id,addSupForm);setSaving(false);setAddSupForm({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});}
   async function removeSup(sid){setSaving(true);await actions.unlinkSupplier(live.id,sid);setSaving(false);}
+  async function addBc(){if(!addBcForm.barcode)return;setSaving(true);try{await actions.addMfgBarcode(live.id,addBcForm.supplierId||null,addBcForm.barcode,addBcForm.description);}catch(e){alert("Barcode already exists: "+addBcForm.barcode);}setSaving(false);setAddBcForm({barcode:"",supplierId:"",description:""});setScanningBc(false);}
+  async function deleteBc(id){setSaving(true);await actions.deleteMfgBarcode(id);setSaving(false);}
   const avail=suppliers.filter(s=>!live.suppliers?.find(x=>x.supplierId===s.id));
   const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
   return <Modal title={live.id} onClose={onClose}>
@@ -758,6 +775,42 @@ function PartDetailModal({ part, suppliers, parts, actions, onClose }) {
             <Btn disabled={saving} onClick={addSup}>{saving?"Saving…":"Add Supplier Link"}</Btn>
           </div>
         </div>}
+      <div>
+        <SectionTitle>Manufacturer Barcodes ({partMfgBarcodes.length})</SectionTitle>
+        {partMfgBarcodes.map((mb,i)=>{
+          const sup=suppliers.find(s=>s.id===mb.supplier_id);
+          return <div key={i} style={{border:`1.5px solid ${C.border}`,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{mb.barcode}</div>
+              {sup&&<div style={{fontSize:12,color:C.textMid,marginTop:2}}>📦 {sup.name}</div>}
+              {mb.description&&<div style={{fontSize:11,color:C.textLight,marginTop:2}}>{mb.description}</div>}
+            </div>
+            <Btn variant="danger" style={{padding:"4px 10px",fontSize:11}} disabled={saving} onClick={()=>deleteBc(mb.id)}>Remove</Btn>
+          </div>;
+        })}
+        {/* Add barcode form */}
+        <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:14,marginTop:6}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:10}}>+ Add Manufacturer Barcode</div>
+          {scanningBc
+            ? <div style={{marginBottom:10}}>
+                <CameraScanner onScan={bc=>{setAddBcForm(f=>({...f,barcode:bc}));setScanningBc(false);}} onClose={()=>setScanningBc(false)} hint="Scan the manufacturer barcode"/>
+              </div>
+            : <Btn variant="outline" style={{width:"100%",justifyContent:"center",marginBottom:10}} onClick={()=>setScanningBc(true)}>📷 Scan Barcode</Btn>
+          }
+          <div style={{display:"grid",gap:8}}>
+            <div style={{display:"flex",gap:8}}>
+              <input value={addBcForm.barcode} onChange={e=>setAddBcForm(f=>({...f,barcode:e.target.value}))}
+                placeholder="Barcode value" style={{...inputStyle,flex:1,fontFamily:"monospace"}}/>
+            </div>
+            <Sel value={addBcForm.supplierId} onChange={e=>setAddBcForm(f=>({...f,supplierId:e.target.value}))}>
+              <option value="">Select supplier (optional)…</option>
+              {suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+            </Sel>
+            <input value={addBcForm.description} onChange={e=>setAddBcForm(f=>({...f,description:e.target.value}))}
+              placeholder="Description (optional)" style={inputStyle}/>
+            <Btn disabled={!addBcForm.barcode||saving} onClick={addBc}>{saving?"Saving…":"Add Barcode"}</Btn>
+          </div>
+        </div>
       </div>
     </div>
   </Modal>;
@@ -1025,8 +1078,8 @@ function MainApp() {
         </div>
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ {error}</div>}
         {loading?<Spinner text="Loading from Supabase…"/>
-          :tab==="scan"?<ScanTab parts={parts} suppliers={suppliers} lps={lps} actions={actions}/>
-          :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} actions={actions}/>
+          :tab==="scan"?<ScanTab parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} actions={actions}/>
