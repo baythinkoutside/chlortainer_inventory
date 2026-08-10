@@ -356,6 +356,11 @@ function useData() {
     await _sb.from("license_plates").update({status}).eq("id",lpId);
     await logAudit("lp_status","license_plate",lpId,{from:lp?.status,to:status});
   }
+  async function updateLP(lpId, changes) {
+    const lp=lps.find(l=>l.id===lpId);
+    await _sb.from("license_plates").update(changes).eq("id",lpId);
+    await logAudit("lp_edit","license_plate",lpId,{before:{type:lp?.type,destination:lp?.destination,items:lp?.items},after:changes});
+  }
   async function addMfgBarcode(partId,supplierId,barcode,description){
     await _sb.from("mfg_barcodes").insert({part_id:partId,supplier_id:supplierId||null,barcode:barcode.trim(),description:description||null});
     await logAudit("barcode_add","part",partId,{barcode,supplier_id:supplierId});
@@ -381,7 +386,7 @@ function useData() {
     await logAudit("stock_adjust","part",partId,{from:part?.stock,to:total,adjustments,source:"supplier_split"});
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
+  return {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1216,73 +1221,142 @@ function CreateLpModal({ parts, actions, onClose }) {
 }
 
 function LpDetailModal({ lp, parts, actions, onClose }) {
+  const isPending = lp.status === "Pending";
   const [status,setStatus]=useState(lp.status);
+  const [destination,setDestination]=useState(lp.destination||"");
+  const [type,setType]=useState(lp.type||"Outbound");
+  const [items,setItems]=useState(lp.items||[]);
+  const [addPartId,setAddPartId]=useState("");
+  const [addQty,setAddQty]=useState(1);
   const [saving,setSaving]=useState(false);
-  async function save(){setSaving(true);await actions.updateLPStatus(lp.id,status);setSaving(false);onClose();}
+
+  async function save(){
+    setSaving(true);
+    if(isPending){
+      await actions.updateLP(lp.id,{status,destination,type,items});
+    } else {
+      await actions.updateLPStatus(lp.id,status);
+    }
+    setSaving(false);
+    onClose();
+  }
+
+  function addItem(){
+    if(!addPartId||items.find(i=>i.partId===addPartId))return;
+    setItems(prev=>[...prev,{partId:addPartId,qty:+addQty||1}]);
+    setAddPartId(""); setAddQty(1);
+  }
+  function removeItem(idx){ setItems(prev=>prev.filter((_,i)=>i!==idx)); }
+  function updateQty(idx,qty){ setItems(prev=>prev.map((it,i)=>i===idx?{...it,qty:Math.max(1,+qty||1)}:it)); }
+
+  const availParts=parts.filter(p=>!items.find(i=>i.partId===p.id));
+
   return <Modal title={lp.id} onClose={onClose}>
     <div style={{display:"grid",gap:18}}>
       <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"16px 0",background:C.offWhite,borderRadius:6,gap:8}}>
         <BarcodeDisplay code={lp.id} size="lg"/>
-        <div style={{display:"flex",gap:8}}><Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge><Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge></div>
+        <div style={{display:"flex",gap:8}}>
+          <Badge color={type==="Outbound"?"red":"navy"}>{type}</Badge>
+          <Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge>
+          {isPending&&<Badge color="green">✏️ Editable</Badge>}
+        </div>
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
-          const itemBlocks=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");const imgTag=p?.image_url?`<img src="${p.image_url}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid #E0E3E7;float:right;margin-left:10px;"/>` : "";return `<div class="item"><div class="item-header">${imgTag}<span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg><div style="clear:both"></div></div>`;}).join("");
-          const bcScripts=(lp.items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
+          const itemBlocks=(items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");const imgTag=p?.image_url?`<img src="${p.image_url}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid #E0E3E7;float:right;margin-left:10px;"/>` : "";return `<div class="item"><div class="item-header">${imgTag}<span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg><div style="clear:both"></div></div>`;}).join("");
+          const bcScripts=(items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
           const w=window.open("","_blank");
           w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
             <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-            <style>
-              *{box-sizing:border-box;margin:0;padding:0;}
-              body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}
-              .lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}
-              .lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
-              .company{font-size:18px;font-weight:900;color:#1C2B3A;}
-              .badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${lp.type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${lp.type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${lp.type==="Outbound"?"#F5A0AE":"#B0BEC5"};}
-              .lp svg{width:100%;margin:8px 0;}
-              .lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}
-              .section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}
-              .item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}
-              .item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
-              .item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}
-              .item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}
-              .item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}
-              .item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}
-              .item svg{width:100%;}
-              @media print{body{padding:6px;}.item{page-break-inside:avoid;}}
-            </style></head>
-            <body onload="window.print()">
-            <div class="lp">
-              <div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${lp.type}</span></div>
-              <svg id="lp-bc"></svg>
-              <div class="lp-footer"><span>→ ${lp.destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${lp.status.toUpperCase()}</span></div>
-            </div>
-            <div class="section-title">Shipment Contents — ${(lp.items||[]).length} Line Item${(lp.items||[]).length!==1?"s":""}</div>
-            ${itemBlocks}
-            <script>
-              JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});
-              ${bcScripts}
-            <\/script>
+            <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}.lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}.lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}.company{font-size:18px;font-weight:900;color:#1C2B3A;}.badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${type==="Outbound"?"#F5A0AE":"#B0BEC5"};}.lp svg{width:100%;margin:8px 0;}.lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}.section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}.item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}.item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}.item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}.item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}.item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}.item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}.item svg{width:100%;}@media print{body{padding:6px;}.item{page-break-inside:avoid;}}</style></head>
+            <body onload="window.print()"><div class="lp"><div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${type}</span></div><svg id="lp-bc"></svg><div class="lp-footer"><span>→ ${destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${status.toUpperCase()}</span></div></div>
+            <div class="section-title">Shipment Contents — ${items.length} Line Item${items.length!==1?"s":""}</div>${itemBlocks}
+            <script>JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});${bcScripts}<\/script>
             </body></html>`);
           w.document.close();
         }}>🖨️ Print License Plate</Btn>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-        {[["Destination",lp.destination],["Created",lp.createdAt||lp.created_at],["Line Items",lp.items?.length||0],["Total Qty",(lp.items||[]).reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
-          <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
-            <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
-        ))}
-      </div>
-      <div style={{display:"flex",gap:10,alignItems:"flex-end"}}>
-        <div style={{flex:1}}><Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}><option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option></Sel></div>
-        <Btn onClick={save} disabled={saving}>{saving?"Saving…":"Save"}</Btn>
-      </div>
-      <div>
-        <SectionTitle>Shipment Contents</SectionTitle>
-        {(lp.items||[]).map((it,i)=>{const p=parts.find(x=>x.id===it.partId);return(
-          <div key={i} style={{border:`1.5px solid ${C.border}`,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div><BarcodeDisplay code={it.partId}/><div style={{fontWeight:700,fontSize:13,color:C.navy,marginTop:6}}>{p?.description||"—"}</div><div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}</div></div>
-            <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:24,fontWeight:700,color:C.amber}}>{it.qty}</div><div style={{fontSize:11,color:C.textLight}}>{p?.uom}</div></div>
+
+      {/* Editable fields — only when Pending */}
+      {isPending
+        ? <div style={{display:"grid",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <Sel label="Type" value={type} onChange={e=>setType(e.target.value)}>
+                <option>Outbound</option><option>Inbound</option><option>Transfer</option>
+              </Sel>
+              <Sel label="Status" value={status} onChange={e=>setStatus(e.target.value)}>
+                <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
+              </Sel>
+            </div>
+            <Field label="Destination">
+              <input value={destination} onChange={e=>setDestination(e.target.value)}
+                placeholder="Customer or manufacturer name" style={{...inputStyle,width:"100%"}}/>
+            </Field>
           </div>
-        );})}
+        : <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            {[["Destination",destination],["Created",lp.createdAt||lp.created_at],["Line Items",items.length],["Total Qty",items.reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
+              <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
+                <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
+            ))}
+            <div style={{gridColumn:"1/-1"}}>
+              <Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}>
+                <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
+              </Sel>
+            </div>
+          </div>
+      }
+
+      {/* Save button */}
+      <Btn onClick={save} disabled={saving} style={{justifyContent:"center"}}>
+        {saving?"Saving…":"💾 Save Changes"}
+      </Btn>
+
+      {/* Line items — editable when Pending */}
+      <div>
+        <SectionTitle>Shipment Contents ({items.length} items · {items.reduce((a,b)=>a+b.qty,0)} total qty)</SectionTitle>
+        {items.map((it,i)=>{
+          const p=parts.find(x=>x.id===it.partId);
+          return (
+            <div key={i} style={{border:`1.5px solid ${C.border}`,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1}}>
+                {p?.image_url&&<img src={p.image_url} alt={it.partId} style={{width:40,height:40,objectFit:"cover",borderRadius:4,float:"right",marginLeft:8}}/>}
+                <BarcodeDisplay code={it.partId}/>
+                <div style={{fontWeight:700,fontSize:13,color:C.navy,marginTop:4}}>{p?.description||"—"}</div>
+                <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}</div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,marginLeft:10}}>
+                {isPending&&<>
+                  <button onClick={()=>updateQty(i,it.qty-1)} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer"}}>−</button>
+                </>}
+                <div style={{textAlign:"center"}}>
+                  {isPending
+                    ? <input type="number" min="1" value={it.qty} onChange={e=>updateQty(i,e.target.value)}
+                        style={{...inputStyle,width:56,textAlign:"center",fontFamily:"monospace",fontWeight:700,fontSize:16,padding:"4px"}}/>
+                    : <div style={{fontFamily:"monospace",fontSize:24,fontWeight:700,color:C.amber}}>{it.qty}</div>
+                  }
+                  <div style={{fontSize:11,color:C.textLight}}>{p?.uom}</div>
+                </div>
+                {isPending&&<>
+                  <button onClick={()=>updateQty(i,it.qty+1)} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer"}}>+</button>
+                  <button onClick={()=>removeItem(i)} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:13}}>✕</button>
+                </>}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Add item — only when Pending */}
+        {isPending&&availParts.length>0&&(
+          <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:12,marginTop:8,display:"flex",gap:8,alignItems:"flex-end"}}>
+            <div style={{flex:1}}>
+              <Sel value={addPartId} onChange={e=>setAddPartId(e.target.value)}>
+                <option value="">Add a part…</option>
+                {availParts.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}
+              </Sel>
+            </div>
+            <input type="number" min="1" value={addQty} onChange={e=>setAddQty(e.target.value)}
+              style={{...inputStyle,width:64,fontFamily:"monospace"}} placeholder="Qty"/>
+            <Btn variant="outline" onClick={addItem} disabled={!addPartId}>Add</Btn>
+          </div>
+        )}
       </div>
     </div>
   </Modal>;
