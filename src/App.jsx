@@ -351,8 +351,8 @@ function useData() {
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
-    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null});
-    await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,items});
+    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null});
+    await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
   }
   async function updateLPStatus(lpId,status){
@@ -1181,7 +1181,11 @@ function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
                 {lp.packing_slip_type&&<Badge color="gray">📋 {lp.packing_slip_type}</Badge>}
               </div>
               <div style={{fontSize:13,color:C.textMid}}>→ {lp.destination}</div>
-              <div style={{fontSize:11,color:C.textLight,marginTop:2}}>Created {lp.createdAt||lp.created_at}</div>
+              <div style={{fontSize:11,color:C.textLight,marginTop:2,display:"flex",gap:12,flexWrap:"wrap"}}>
+                <span>Created {lp.createdAt||lp.created_at}</span>
+                {lp.quote_number&&<span>Quote: <strong>{lp.quote_number}</strong></span>}
+                {lp.po_number&&<span>PO: <strong>{lp.po_number}</strong></span>}
+              </div>
             </div>
             <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.amber}}>{lp.items?.length||0}</div><div style={{fontSize:11,color:C.textLight}}>line items</div></div>
           </div>
@@ -1198,7 +1202,7 @@ function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
 }
 
 function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
-  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:""});
+  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:"",quote_number:"",po_number:""});
   const [items,setItems]=useState([]);
   const [pickPart,setPickPart]=useState(""); const [pickQty,setPickQty]=useState(1);
   const [saving,setSaving]=useState(false);
@@ -1217,6 +1221,10 @@ function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
         <Sel label="Status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}><option>Pending</option><option>Shipped</option><option>Received</option></Sel>
       </div>
       <Input label="Destination / Ship To" value={form.destination} onChange={e=>setForm(f=>({...f,destination:e.target.value}))} placeholder="Customer or manufacturer name"/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Input label="Quote Number" value={form.quote_number} onChange={e=>setForm(f=>({...f,quote_number:e.target.value}))} placeholder="e.g. 4113"/>
+        <Input label="P.O. Number" value={form.po_number} onChange={e=>setForm(f=>({...f,po_number:e.target.value}))} placeholder="e.g. 26-200-02"/>
+      </div>
       <div>
         <Field label="Packing Slip Type">
           <div style={{display:"flex",gap:8}}>
@@ -1261,6 +1269,8 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
   const [destination,setDestination]=useState(lp.destination||"");
   const [type,setType]=useState(lp.type||"Outbound");
   const [packingSlipType,setPackingSlipType]=useState(lp.packing_slip_type||"");
+  const [quoteNumber,setQuoteNumber]=useState(lp.quote_number||"");
+  const [poNumber,setPoNumber]=useState(lp.po_number||"");
   const [items,setItems]=useState(lp.items||[]);
   const [addPartId,setAddPartId]=useState("");
   const [addQty,setAddQty]=useState(1);
@@ -1271,7 +1281,7 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
   async function save(){
     setSaving(true);
     if(isPending){
-      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null});
+      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null});
     } else {
       await actions.updateLPStatus(lp.id,status);
     }
@@ -1305,8 +1315,8 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
           const w=window.open("","_blank");
           w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
             <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-            <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}.lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}.lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}.company{font-size:18px;font-weight:900;color:#1C2B3A;}.badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${type==="Outbound"?"#F5A0AE":"#B0BEC5"};}.lp svg{width:100%;margin:8px 0;}.lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}.section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}.item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}.item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}.item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}.item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}.item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}.item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}.item svg{width:100%;}@media print{body{padding:6px;}.item{page-break-inside:avoid;}}</style></head>
-            <body onload="window.print()"><div class="lp"><div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${type}</span></div><svg id="lp-bc"></svg><div class="lp-footer"><span>→ ${destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${status.toUpperCase()}</span></div></div>
+            <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}.lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}.lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}.company{font-size:18px;font-weight:900;color:#1C2B3A;}.badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${type==="Outbound"?"#F5A0AE":"#B0BEC5"};}.lp svg{width:100%;margin:8px 0;}.lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}.lp-refs{display:flex;gap:16px;font-size:10px;color:#1C2B3A;margin-top:6px;padding-top:6px;border-top:1px solid #E0E3E7;}.section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}.item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}.item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}.item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}.item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}.item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}.item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}.item svg{width:100%;}@media print{body{padding:6px;}.item{page-break-inside:avoid;}}</style></head>
+            <body onload="window.print()"><div class="lp"><div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${type}</span></div><svg id="lp-bc"></svg><div class="lp-footer"><span>→ ${destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${status.toUpperCase()}</span></div>${quoteNumber||poNumber?`<div class="lp-refs">${quoteNumber?`<span>Quote: <strong>${quoteNumber}</strong></span>`:""}${packingSlipType?`<span>📋 ${packingSlipType}</span>`:""}${poNumber?`<span>PO: <strong>${poNumber}</strong></span>`:""}</div>`:""}</div>
             <div class="section-title">Shipment Contents — ${items.length} Line Item${items.length!==1?"s":""}</div>${itemBlocks}
             <script>JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});${bcScripts}<\/script>
             </body></html>`);
@@ -1329,6 +1339,16 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
               <input value={destination} onChange={e=>setDestination(e.target.value)}
                 placeholder="Customer or manufacturer name" style={{...inputStyle,width:"100%"}}/>
             </Field>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <Field label="Quote Number">
+                <input value={quoteNumber} onChange={e=>setQuoteNumber(e.target.value)}
+                  placeholder="e.g. 4113" style={inputStyle}/>
+              </Field>
+              <Field label="P.O. Number">
+                <input value={poNumber} onChange={e=>setPoNumber(e.target.value)}
+                  placeholder="e.g. 26-200-02" style={inputStyle}/>
+              </Field>
+            </div>
             <div>
               <Field label="Packing Slip Type">
                 <div style={{display:"flex",gap:8}}>
@@ -1354,6 +1374,10 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
               ))}
             </div>
             {lp.packing_slip_type&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Packing Slip Type</div><Badge color="gray">📋 {lp.packing_slip_type}</Badge></div>}
+            {(lp.quote_number||lp.po_number)&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              {lp.quote_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Quote Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.quote_number}</div></div>}
+              {lp.po_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>P.O. Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.po_number}</div></div>}
+            </div>}
             <Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}>
               <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
             </Sel>
