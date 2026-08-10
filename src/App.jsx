@@ -914,25 +914,42 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
         <BarcodeDisplay code={lp.id} size="lg"/>
         <div style={{display:"flex",gap:8}}><Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge><Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge></div>
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
-          const itemRows=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);return `<tr><td style="font-family:monospace;font-weight:700;color:#1C2B3A;padding:4px 8px;">${it.partId}</td><td style="padding:4px 8px;color:#4A5568;">${p?.description||"—"}</td><td style="padding:4px 8px;font-family:monospace;font-weight:700;color:#F5A623;text-align:right;">×${it.qty}</td></tr>`;}).join("");
+          const itemBlocks=(lp.items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `<div class="item"><div class="item-header"><span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg></div>`;}).join("");
+          const bcScripts=(lp.items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
           const w=window.open("","_blank");
           w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
             <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-            <style>body{font-family:Arial,sans-serif;padding:20px;max-width:400px;margin:0 auto;}
-            .lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;}
-            .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
-            .company{font-size:16px;font-weight:900;color:#1C2B3A;}
-            .badge{font-size:9px;font-weight:700;padding:3px 8px;border-radius:3px;text-transform:uppercase;}
-            table{width:100%;border-collapse:collapse;margin-top:10px;border-top:1px solid #E0E3E7;}
-            .footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;margin-top:10px;padding-top:8px;border-top:1px solid #E0E3E7;}
+            <style>
+              *{box-sizing:border-box;margin:0;padding:0;}
+              body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}
+              .lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}
+              .lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+              .company{font-size:18px;font-weight:900;color:#1C2B3A;}
+              .badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${lp.type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${lp.type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${lp.type==="Outbound"?"#F5A0AE":"#B0BEC5"};}
+              .lp svg{width:100%;margin:8px 0;}
+              .lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}
+              .section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}
+              .item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}
+              .item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+              .item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}
+              .item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}
+              .item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}
+              .item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}
+              .item svg{width:100%;}
+              @media print{body{padding:6px;}.item{page-break-inside:avoid;}}
             </style></head>
-            <body onload="window.print()"><div class="lp">
-            <div class="header"><div class="company">ChlorTainer</div><span class="badge">${lp.type}</span></div>
-            <svg id="lp-bc"></svg>
-            <table>${itemRows}</table>
-            <div class="footer"><span>→ ${lp.destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${lp.status.toUpperCase()}</span></div>
+            <body onload="window.print()">
+            <div class="lp">
+              <div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${lp.type}</span></div>
+              <svg id="lp-bc"></svg>
+              <div class="lp-footer"><span>→ ${lp.destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${lp.status.toUpperCase()}</span></div>
             </div>
-            <script>JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});<\/script>
+            <div class="section-title">Shipment Contents — ${(lp.items||[]).length} Line Item${(lp.items||[]).length!==1?"s":""}</div>
+            ${itemBlocks}
+            <script>
+              JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});
+              ${bcScripts}
+            <\/script>
             </body></html>`);
           w.document.close();
         }}>🖨️ Print License Plate</Btn>
