@@ -261,18 +261,20 @@ function useData() {
   const [lps,setLps]=useState([]);
   const [mfgBarcodes,setMfgBarcodes]=useState([]);
   const [supplierStock,setSupplierStock]=useState([]);
+  const [packingSlipTypes,setPackingSlipTypes]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
   const fetchAll = async () => {
     const sb = _sb;
-    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock}] = await Promise.all([
+    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
       sb.from("license_plates").select("*").order("created_at",{ascending:false}),
       sb.from("mfg_barcodes").select("*").order("created_at",{ascending:false}),
       sb.from("supplier_stock").select("*"),
+      sb.from("packing_slip_types").select("*").order("sort_order"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
@@ -281,6 +283,7 @@ function useData() {
     setLps((plates||[]).map(lp=>({...lp,createdAt:lp.created_at,items:lp.items||[]})));
     setMfgBarcodes(barcodes||[]);
     setSupplierStock(supStock||[]);
+    setPackingSlipTypes(pst||[]);
   };
 
   useEffect(()=>{
@@ -297,6 +300,7 @@ function useData() {
           _sb.channel("lp").on("postgres_changes",{event:"*",schema:"public",table:"license_plates"},refresh).subscribe(),
           _sb.channel("mb").on("postgres_changes",{event:"*",schema:"public",table:"mfg_barcodes"},refresh).subscribe(),
           _sb.channel("ss").on("postgres_changes",{event:"*",schema:"public",table:"supplier_stock"},refresh).subscribe(),
+          _sb.channel("pst").on("postgres_changes",{event:"*",schema:"public",table:"packing_slip_types"},refresh).subscribe(),
         ];
       } catch(e){setError(e.message);setLoading(false);}
     })();
@@ -347,8 +351,8 @@ function useData() {
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
-    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items});
-    await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,items});
+    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null});
+    await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,items});
     return id;
   }
   async function updateLPStatus(lpId,status){
@@ -386,7 +390,12 @@ function useData() {
     await logAudit("stock_adjust","part",partId,{from:part?.stock,to:total,adjustments,source:"supplier_split"});
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage}};
+  async function addPackingSlipType(name){
+    await _sb.from("packing_slip_types").insert({name,sort_order:packingSlipTypes.length+1});
+    await logAudit("packing_slip_type_add","packing_slip_types",name,{name});
+  }
+
+  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1153,7 +1162,7 @@ function InventoryTab({ parts, suppliers }) {
 }
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
-function LicensePlatesTab({ lps, parts, actions }) {
+function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
@@ -1165,7 +1174,12 @@ function LicensePlatesTab({ lps, parts, actions }) {
           onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
             <div>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.id}</span><Badge color={sc(lp.status)}>{lp.status}</Badge><Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge></div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+                <span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.id}</span>
+                <Badge color={sc(lp.status)}>{lp.status}</Badge>
+                <Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge>
+                {lp.packing_slip_type&&<Badge color="gray">📋 {lp.packing_slip_type}</Badge>}
+              </div>
               <div style={{fontSize:13,color:C.textMid}}>→ {lp.destination}</div>
               <div style={{fontSize:11,color:C.textLight,marginTop:2}}>Created {lp.createdAt||lp.created_at}</div>
             </div>
@@ -1178,19 +1192,24 @@ function LicensePlatesTab({ lps, parts, actions }) {
       ))}
       {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
     </div>
-    {showCreate&&<CreateLpModal parts={parts} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} actions={actions} onClose={()=>setViewLp(null)}/>}
+    {showCreate&&<CreateLpModal parts={parts} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
+    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setViewLp(null)}/>}
   </div>;
 }
 
-function CreateLpModal({ parts, actions, onClose }) {
-  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending"});
+function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
+  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:""});
   const [items,setItems]=useState([]);
   const [pickPart,setPickPart]=useState(""); const [pickQty,setPickQty]=useState(1);
   const [saving,setSaving]=useState(false);
+  const [newTypeInput,setNewTypeInput]=useState("");
+  const [addingType,setAddingType]=useState(false);
+
   function addItem(){if(!pickPart||pickQty<1||items.find(i=>i.partId===pickPart))return;setItems(p=>[...p,{partId:pickPart,qty:+pickQty}]);setPickPart("");setPickQty(1);}
   async function create(){if(!form.destination||items.length===0)return;setSaving(true);await actions.createLP(form,items);setSaving(false);onClose();}
+  async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setForm(f=>({...f,packing_slip_type:newTypeInput.trim()}));setNewTypeInput("");setAddingType(false);}
   const available=parts.filter(p=>!items.find(i=>i.partId===p.id));
+
   return <Modal title="Create License Plate" onClose={onClose}>
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
@@ -1198,6 +1217,22 @@ function CreateLpModal({ parts, actions, onClose }) {
         <Sel label="Status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}><option>Pending</option><option>Shipped</option><option>Received</option></Sel>
       </div>
       <Input label="Destination / Ship To" value={form.destination} onChange={e=>setForm(f=>({...f,destination:e.target.value}))} placeholder="Customer or manufacturer name"/>
+      <div>
+        <Field label="Packing Slip Type">
+          <div style={{display:"flex",gap:8}}>
+            <select value={form.packing_slip_type} onChange={e=>setForm(f=>({...f,packing_slip_type:e.target.value}))} style={{...inputStyle,flex:1}}>
+              <option value="">Select type…</option>
+              {packingSlipTypes.map(t=><option key={t.id} value={t.name}>{t.name}</option>)}
+            </select>
+            <Btn variant="outline" style={{padding:"6px 12px",fontSize:12,whiteSpace:"nowrap"}} onClick={()=>setAddingType(v=>!v)}>+ New</Btn>
+          </div>
+        </Field>
+        {addingType&&<div style={{display:"flex",gap:8,marginTop:8}}>
+          <input value={newTypeInput} onChange={e=>setNewTypeInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCustomType()}
+            placeholder="e.g. Bulk Parts" style={{...inputStyle,flex:1}}/>
+          <Btn onClick={addCustomType} disabled={!newTypeInput.trim()}>Add</Btn>
+        </div>}
+      </div>
       <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
         <SectionTitle>Line Items</SectionTitle>
         {items.map((it,i)=>{const p=parts.find(x=>x.id===it.partId);return(
@@ -1220,26 +1255,30 @@ function CreateLpModal({ parts, actions, onClose }) {
   </Modal>;
 }
 
-function LpDetailModal({ lp, parts, actions, onClose }) {
+function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
   const isPending = lp.status === "Pending";
   const [status,setStatus]=useState(lp.status);
   const [destination,setDestination]=useState(lp.destination||"");
   const [type,setType]=useState(lp.type||"Outbound");
+  const [packingSlipType,setPackingSlipType]=useState(lp.packing_slip_type||"");
   const [items,setItems]=useState(lp.items||[]);
   const [addPartId,setAddPartId]=useState("");
   const [addQty,setAddQty]=useState(1);
   const [saving,setSaving]=useState(false);
+  const [newTypeInput,setNewTypeInput]=useState("");
+  const [addingType,setAddingType]=useState(false);
 
   async function save(){
     setSaving(true);
     if(isPending){
-      await actions.updateLP(lp.id,{status,destination,type,items});
+      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null});
     } else {
       await actions.updateLPStatus(lp.id,status);
     }
     setSaving(false);
     onClose();
   }
+  async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setPackingSlipType(newTypeInput.trim());setNewTypeInput("");setAddingType(false);}
 
   function addItem(){
     if(!addPartId||items.find(i=>i.partId===addPartId))return;
@@ -1290,17 +1329,34 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
               <input value={destination} onChange={e=>setDestination(e.target.value)}
                 placeholder="Customer or manufacturer name" style={{...inputStyle,width:"100%"}}/>
             </Field>
-          </div>
-        : <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-            {[["Destination",destination],["Created",lp.createdAt||lp.created_at],["Line Items",items.length],["Total Qty",items.reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
-              <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
-                <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
-            ))}
-            <div style={{gridColumn:"1/-1"}}>
-              <Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}>
-                <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
-              </Sel>
+            <div>
+              <Field label="Packing Slip Type">
+                <div style={{display:"flex",gap:8}}>
+                  <select value={packingSlipType} onChange={e=>setPackingSlipType(e.target.value)} style={{...inputStyle,flex:1}}>
+                    <option value="">Select type…</option>
+                    {(packingSlipTypes||[]).map(t=><option key={t.id} value={t.name}>{t.name}</option>)}
+                  </select>
+                  <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={()=>setAddingType(v=>!v)}>+ New</Btn>
+                </div>
+              </Field>
+              {addingType&&<div style={{display:"flex",gap:8,marginTop:8}}>
+                <input value={newTypeInput} onChange={e=>setNewTypeInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCustomType()}
+                  placeholder="e.g. Bulk Parts" style={{...inputStyle,flex:1}}/>
+                <Btn onClick={addCustomType} disabled={!newTypeInput.trim()}>Add</Btn>
+              </div>}
             </div>
+          </div>
+        : <div style={{display:"grid",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              {[["Destination",destination],["Created",lp.createdAt||lp.created_at],["Line Items",items.length],["Total Qty",items.reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
+                <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
+                  <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
+              ))}
+            </div>
+            {lp.packing_slip_type&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Packing Slip Type</div><Badge color="gray">📋 {lp.packing_slip_type}</Badge></div>}
+            <Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}>
+              <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
+            </Sel>
           </div>
       }
 
@@ -1365,7 +1421,7 @@ function LpDetailModal({ lp, parts, actions, onClose }) {
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,mfgBarcodes,supplierStock,loading,error,actions}=useData();
+  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
@@ -1419,7 +1475,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
-          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} actions={actions}/>
+          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="audit"?<AuditLogTab/>
           :null}
       </div>
