@@ -825,6 +825,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("All");
   const [showAdd,setShowAdd]=useState(false);
+  const [showImport,setShowImport]=useState(false);
   const [viewPart,setViewPart]=useState(null);
   const [form,setForm]=useState({description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});
   const [saving,setSaving]=useState(false);
@@ -837,6 +838,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search SKU or description…" style={{...inputStyle,flex:1,minWidth:180}}/>
       <select value={filter} onChange={e=>setFilter(e.target.value)} style={inputStyle}>{cats.map(c=><option key={c}>{c}</option>)}</select>
+      <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
       <Btn onClick={()=>setShowAdd(true)}>+ Add Part</Btn>
     </div>
     <div style={{display:"grid",gap:10}}>
@@ -886,6 +888,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
       </div>
     </Modal>}
     {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions} onClose={()=>setViewPart(null)}/>}
+    {showImport&&<CsvImportModal type="parts" actions={actions} existingRecords={parts} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
 
@@ -1114,9 +1117,201 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
   </Modal>;
 }
 
+// ─── CSV Import ───────────────────────────────────────────────────────────────
+const CSV_TEMPLATES = {
+  customers: {
+    columns: ["name","contact","phone","email","address_line1","address_line2","city","state","zip"],
+    required: ["name"],
+    example: "Murphy Builders,John Smith,(505) 863-6274,orders@murphy.com,808 Boardman Dr,,Gallup,NM,87301",
+    matchOn: "name",
+  },
+  parts: {
+    columns: ["id","description","category","uom","stock","min_stock","location"],
+    required: ["id","description"],
+    example: "CT-BC-0007,Pressure Relief Valve,Valves,EA,10,5,C-03-01",
+    matchOn: "id",
+  },
+  suppliers: {
+    columns: ["id","name","contact","phone"],
+    required: ["name"],
+    example: "SUP-005,Grainger,orders@grainger.com,800-472-4643",
+    matchOn: "name",
+  },
+};
+
+function CsvImportModal({ type, actions, existingRecords, onClose }) {
+  const tmpl = CSV_TEMPLATES[type];
+  const [step, setStep] = useState("upload"); // upload | preview | done
+  const [rows, setRows] = useState([]);
+  const [errors, setErrors] = useState([]);
+  const [importing, setImporting] = useState(false);
+  const [results, setResults] = useState({added:0,updated:0,failed:0});
+  const fileRef = useRef(null);
+
+  function parseCSV(text) {
+    const lines = text.trim().split("\n").filter(l=>l.trim());
+    // Detect if first line is a header
+    const firstLine = lines[0].split(",").map(s=>s.trim().toLowerCase());
+    const hasHeader = tmpl.columns.some(c=>firstLine.includes(c));
+    const dataLines = hasHeader ? lines.slice(1) : lines;
+
+    const parsed = [];
+    const errs = [];
+    dataLines.forEach((line, i) => {
+      const vals = line.split(",").map(s=>s.trim().replace(/^"|"$/g,""));
+      const row = {};
+      tmpl.columns.forEach((col, j) => { row[col] = vals[j] || ""; });
+      // Check required
+      const missing = tmpl.required.filter(r=>!row[r]);
+      if (missing.length) {
+        errs.push(`Row ${i+1}: missing required field(s): ${missing.join(", ")}`);
+      } else {
+        // Check if record exists
+        const match = existingRecords.find(r =>
+          (r[tmpl.matchOn]||"").toLowerCase() === (row[tmpl.matchOn]||"").toLowerCase()
+        );
+        row._action = match ? "update" : "add";
+        row._matchId = match?.id || null;
+        parsed.push(row);
+      }
+    });
+    return { parsed, errs };
+  }
+
+  function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const { parsed, errs } = parseCSV(ev.target.result);
+      setRows(parsed);
+      setErrors(errs);
+      setStep("preview");
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  async function runImport() {
+    setImporting(true);
+    let added=0, updated=0, failed=0;
+    for (const row of rows) {
+      try {
+        if (type === "customers") {
+          if (row._action === "update") await actions.updateCustomer(row._matchId, row);
+          else await actions.addCustomer(row);
+        } else if (type === "parts") {
+          const form = {...row, minStock: row.min_stock};
+          if (row._action === "update") {
+            await _sb.from("parts").update({description:row.description,category:row.category,uom:row.uom,stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location}).eq("id",row.id);
+            await logAudit("part_edit","part",row.id,{source:"csv_import"});
+          } else {
+            await _sb.from("parts").insert({id:row.id,description:row.description,category:row.category,uom:row.uom||"EA",stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location});
+            await logAudit("part_add","part",row.id,{source:"csv_import"});
+          }
+        } else if (type === "suppliers") {
+          if (row._action === "update") {
+            await _sb.from("suppliers").update({name:row.name,contact:row.contact,phone:row.phone}).eq("id",row._matchId);
+            await logAudit("supplier_edit","supplier",row._matchId,{source:"csv_import"});
+          } else {
+            const id = row.id || `SUP-${String(Math.floor(Math.random()*9000)+1000)}`;
+            await _sb.from("suppliers").insert({id,name:row.name,contact:row.contact,phone:row.phone});
+            await logAudit("supplier_add","supplier",id,{source:"csv_import"});
+          }
+        }
+        row._action === "update" ? updated++ : added++;
+      } catch(e) { failed++; }
+    }
+    setResults({added,updated,failed});
+    setImporting(false);
+    setStep("done");
+  }
+
+  function downloadTemplate() {
+    const header = tmpl.columns.join(",");
+    const content = `${header}\n${tmpl.example}`;
+    const blob = new Blob([content], {type:"text/csv"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `chlortainer-${type}-template.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  }
+
+  const typeLabel = type.charAt(0).toUpperCase()+type.slice(1);
+
+  return <Modal title={`Import ${typeLabel} from CSV`} onClose={onClose}>
+    <div style={{display:"grid",gap:16}}>
+
+      {step==="upload"&&<>
+        <div style={{background:C.offWhite,borderRadius:8,padding:16}}>
+          <div style={{fontSize:13,fontWeight:700,color:C.navy,marginBottom:8}}>Required columns:</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
+            {tmpl.columns.map(c=><span key={c} style={{background:tmpl.required.includes(c)?C.amber:"#E8EDF2",color:tmpl.required.includes(c)?C.navy:C.textMid,borderRadius:4,padding:"2px 8px",fontSize:11,fontFamily:"monospace",fontWeight:tmpl.required.includes(c)?700:400}}>{c}{tmpl.required.includes(c)?" *":""}</span>)}
+          </div>
+          <Btn variant="outline" style={{fontSize:12,padding:"5px 12px"}} onClick={downloadTemplate}>⬇️ Download Template CSV</Btn>
+        </div>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={handleFile}/>
+        <Btn style={{width:"100%",justifyContent:"center",padding:"14px"}} onClick={()=>fileRef.current?.click()}>
+          📂 Choose CSV File
+        </Btn>
+        <p style={{fontSize:11,color:C.textLight,textAlign:"center"}}>First row can be a header or data. Existing records matched on <strong>{tmpl.matchOn}</strong> will be updated.</p>
+      </>}
+
+      {step==="preview"&&<>
+        {errors.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.red,marginBottom:6}}>⚠️ {errors.length} row(s) with errors — will be skipped:</div>
+          {errors.map((e,i)=><div key={i} style={{fontSize:11,color:C.red}}>{e}</div>)}
+        </div>}
+        <div style={{fontSize:13,color:C.textMid}}>
+          <strong>{rows.filter(r=>r._action==="add").length}</strong> to add &nbsp;·&nbsp;
+          <strong>{rows.filter(r=>r._action==="update").length}</strong> to update &nbsp;·&nbsp;
+          <strong>{errors.length}</strong> skipped
+        </div>
+        <div style={{maxHeight:280,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:6}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+            <thead style={{background:C.navy,position:"sticky",top:0}}>
+              <tr>
+                <th style={{padding:"6px 10px",color:C.amber,textAlign:"left",fontWeight:700}}>Action</th>
+                {tmpl.columns.slice(0,4).map(c=><th key={c} style={{padding:"6px 10px",color:"#8A9BB0",textAlign:"left"}}>{c}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row,i)=><tr key={i} style={{background:i%2===0?C.white:C.offWhite,borderBottom:`1px solid ${C.border}`}}>
+                <td style={{padding:"5px 10px"}}><Badge color={row._action==="add"?"green":"amber"}>{row._action==="add"?"+ Add":"↻ Update"}</Badge></td>
+                {tmpl.columns.slice(0,4).map(c=><td key={c} style={{padding:"5px 10px",color:C.textDark,fontFamily:c==="id"?"monospace":"sans-serif"}}>{row[c]||<span style={{color:C.textLight}}>—</span>}</td>)}
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+          <Btn variant="outline" onClick={()=>setStep("upload")}>← Back</Btn>
+          <Btn onClick={runImport} disabled={importing||rows.length===0}>
+            {importing?`Importing…`:`✅ Import ${rows.length} Records`}
+          </Btn>
+        </div>
+      </>}
+
+      {step==="done"&&<>
+        <div style={{textAlign:"center",padding:"20px 0"}}>
+          <div style={{fontSize:48,marginBottom:12}}>✅</div>
+          <div style={{fontSize:18,fontWeight:700,color:C.navy,marginBottom:8}}>Import Complete</div>
+          <div style={{display:"flex",justifyContent:"center",gap:24,marginTop:12}}>
+            <div style={{textAlign:"center"}}><div style={{fontFamily:"monospace",fontSize:28,fontWeight:700,color:C.greenText}}>{results.added}</div><div style={{fontSize:12,color:C.textLight}}>Added</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontFamily:"monospace",fontSize:28,fontWeight:700,color:C.amber}}>{results.updated}</div><div style={{fontSize:12,color:C.textLight}}>Updated</div></div>
+            {results.failed>0&&<div style={{textAlign:"center"}}><div style={{fontFamily:"monospace",fontSize:28,fontWeight:700,color:C.red}}>{results.failed}</div><div style={{fontSize:12,color:C.textLight}}>Failed</div></div>}
+          </div>
+        </div>
+        <Btn style={{width:"100%",justifyContent:"center"}} onClick={onClose}>Done</Btn>
+      </>}
+
+    </div>
+  </Modal>;
+}
+
 // ─── Customers Tab ────────────────────────────────────────────────────────────
 function CustomersTab({ customers, lps, actions }) {
   const [showAdd,setShowAdd]=useState(false);
+  const [showImport,setShowImport]=useState(false);
   const [editCust,setEditCust]=useState(null);
   const [search,setSearch]=useState("");
   const emptyForm={name:"",contact:"",phone:"",email:"",address_line1:"",address_line2:"",city:"",state:"",zip:""};
@@ -1126,6 +1321,7 @@ function CustomersTab({ customers, lps, actions }) {
   return <div>
     <div style={{display:"flex",gap:10,marginBottom:18,alignItems:"center"}}>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search customers…" style={{...inputStyle,flex:1}}/>
+      <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
       <Btn onClick={()=>setShowAdd(true)}>+ Add Customer</Btn>
     </div>
     <div style={{display:"grid",gap:10}}>
@@ -1162,8 +1358,10 @@ function CustomersTab({ customers, lps, actions }) {
     </div>
     {showAdd&&<CustomerModal title="Add Customer" initialForm={emptyForm} actions={actions} onClose={()=>setShowAdd(false)}/>}
     {editCust&&<CustomerModal title="Edit Customer" initialForm={editCust} customerId={editCust.id} actions={actions} onClose={()=>setEditCust(null)}/>}
+    {showImport&&<CsvImportModal type="customers" actions={actions} existingRecords={customers} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
+
 
 function CustomerModal({ title, initialForm, customerId, actions, onClose }) {
   const [form,setForm]=useState({
@@ -1216,11 +1414,15 @@ function CustomerModal({ title, initialForm, customerId, actions, onClose }) {
 // ─── Suppliers Tab ────────────────────────────────────────────────────────────
 function SuppliersTab({ suppliers, parts, actions }) {
   const [showAdd,setShowAdd]=useState(false);
+  const [showImport,setShowImport]=useState(false);
   const [form,setForm]=useState({name:"",contact:"",phone:""});
   const [saving,setSaving]=useState(false);
   async function add(){if(!form.name)return;setSaving(true);await actions.addSupplier(form);setSaving(false);setForm({name:"",contact:"",phone:""});setShowAdd(false);}
   return <div>
-    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:18}}><Btn onClick={()=>setShowAdd(true)}>+ Add Supplier</Btn></div>
+    <div style={{display:"flex",justifyContent:"flex-end",gap:10,marginBottom:18}}>
+      <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
+      <Btn onClick={()=>setShowAdd(true)}>+ Add Supplier</Btn>
+    </div>
     <div style={{display:"grid",gap:10}}>
       {suppliers.map(s=>{
         const linked=parts.filter(p=>p.suppliers?.find(x=>x.supplierId===s.id));
@@ -1250,10 +1452,9 @@ function SuppliersTab({ suppliers, parts, actions }) {
         </div>
       </div>
     </Modal>}
+    {showImport&&<CsvImportModal type="suppliers" actions={actions} existingRecords={suppliers} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
-
-// ─── Inventory Tab ────────────────────────────────────────────────────────────
 function InventoryTab({ parts, suppliers }) {
   const [filter,setFilter]=useState("All");
   const alerts=parts.filter(p=>p.stock<p.minStock);
