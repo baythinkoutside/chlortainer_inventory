@@ -262,12 +262,13 @@ function useData() {
   const [mfgBarcodes,setMfgBarcodes]=useState([]);
   const [supplierStock,setSupplierStock]=useState([]);
   const [packingSlipTypes,setPackingSlipTypes]=useState([]);
+  const [customers,setCustomers]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
   const fetchAll = async () => {
     const sb = _sb;
-    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst}] = await Promise.all([
+    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst},{data:custs}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
@@ -275,6 +276,7 @@ function useData() {
       sb.from("mfg_barcodes").select("*").order("created_at",{ascending:false}),
       sb.from("supplier_stock").select("*"),
       sb.from("packing_slip_types").select("*").order("sort_order"),
+      sb.from("customers").select("*").order("name"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
@@ -284,6 +286,7 @@ function useData() {
     setMfgBarcodes(barcodes||[]);
     setSupplierStock(supStock||[]);
     setPackingSlipTypes(pst||[]);
+    setCustomers(custs||[]);
   };
 
   useEffect(()=>{
@@ -301,6 +304,7 @@ function useData() {
           _sb.channel("mb").on("postgres_changes",{event:"*",schema:"public",table:"mfg_barcodes"},refresh).subscribe(),
           _sb.channel("ss").on("postgres_changes",{event:"*",schema:"public",table:"supplier_stock"},refresh).subscribe(),
           _sb.channel("pst").on("postgres_changes",{event:"*",schema:"public",table:"packing_slip_types"},refresh).subscribe(),
+          _sb.channel("cust").on("postgres_changes",{event:"*",schema:"public",table:"customers"},refresh).subscribe(),
         ];
       } catch(e){setError(e.message);setLoading(false);}
     })();
@@ -351,7 +355,7 @@ function useData() {
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
-    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null});
+    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null,customer_id:form.customer_id||null});
     await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
   }
@@ -394,8 +398,30 @@ function useData() {
     await _sb.from("packing_slip_types").insert({name,sort_order:packingSlipTypes.length+1});
     await logAudit("packing_slip_type_add","packing_slip_types",name,{name});
   }
+  async function addCustomer(form){
+    const {data,error} = await _sb.from("customers").insert({
+      name:form.name, contact:form.contact, phone:form.phone, email:form.email,
+      address_line1:form.address_line1, address_line2:form.address_line2,
+      city:form.city, state:form.state, zip:form.zip
+    }).select().single();
+    if(error) throw new Error(error.message);
+    await logAudit("customer_add","customer",data.id,{name:form.name});
+    return data;
+  }
+  async function updateCustomer(id,form){
+    await _sb.from("customers").update({
+      name:form.name, contact:form.contact, phone:form.phone, email:form.email,
+      address_line1:form.address_line1, address_line2:form.address_line2,
+      city:form.city, state:form.state, zip:form.zip
+    }).eq("id",id);
+    await logAudit("customer_edit","customer",id,{name:form.name});
+  }
+  async function deleteCustomer(id){
+    await _sb.from("customers").delete().eq("id",id);
+    await logAudit("customer_delete","customer",id,{});
+  }
 
-  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType}};
+  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1088,6 +1114,105 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
   </Modal>;
 }
 
+// ─── Customers Tab ────────────────────────────────────────────────────────────
+function CustomersTab({ customers, lps, actions }) {
+  const [showAdd,setShowAdd]=useState(false);
+  const [editCust,setEditCust]=useState(null);
+  const [search,setSearch]=useState("");
+  const emptyForm={name:"",contact:"",phone:"",email:"",address_line1:"",address_line2:"",city:"",state:"",zip:""};
+
+  const filtered=customers.filter(c=>c.name.toLowerCase().includes(search.toLowerCase())||c.city?.toLowerCase().includes(search.toLowerCase()));
+
+  return <div>
+    <div style={{display:"flex",gap:10,marginBottom:18,alignItems:"center"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search customers…" style={{...inputStyle,flex:1}}/>
+      <Btn onClick={()=>setShowAdd(true)}>+ Add Customer</Btn>
+    </div>
+    <div style={{display:"grid",gap:10}}>
+      {filtered.map(c=>{
+        const custLps=lps.filter(l=>l.customer_id===c.id);
+        return <div key={c.id} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"16px 20px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:800,fontSize:15,color:C.navy,marginBottom:4}}>{c.name}</div>
+              {(c.address_line1||c.city)&&<div style={{fontSize:12,color:C.textMid,marginBottom:4}}>
+                {[c.address_line1,c.address_line2,c.city,c.state,c.zip].filter(Boolean).join(", ")}
+              </div>}
+              <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                {c.contact&&<span style={{fontSize:12,color:C.textMid}}>👤 {c.contact}</span>}
+                {c.email&&<span style={{fontSize:12,color:C.textMid}}>✉ {c.email}</span>}
+                {c.phone&&<span style={{fontSize:12,color:C.textMid}}>📞 {c.phone}</span>}
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.amber}}>{custLps.length}</div>
+                <div style={{fontSize:11,color:C.textLight}}>shipments</div>
+              </div>
+              <Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} onClick={()=>setEditCust(c)}>Edit</Btn>
+            </div>
+          </div>
+          {custLps.length>0&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`,display:"flex",flexWrap:"wrap",gap:6}}>
+            {custLps.slice(0,5).map(lp=><span key={lp.id} style={{background:"#EBF2FA",color:C.navy,border:"1px solid #9DC3E6",borderRadius:3,padding:"2px 8px",fontSize:11,fontFamily:"monospace"}}>{lp.id}</span>)}
+            {custLps.length>5&&<span style={{fontSize:11,color:C.textLight}}>+{custLps.length-5} more</span>}
+          </div>}
+        </div>;
+      })}
+      {filtered.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No customers found.</div>}
+    </div>
+    {showAdd&&<CustomerModal title="Add Customer" initialForm={emptyForm} actions={actions} onClose={()=>setShowAdd(false)}/>}
+    {editCust&&<CustomerModal title="Edit Customer" initialForm={editCust} customerId={editCust.id} actions={actions} onClose={()=>setEditCust(null)}/>}
+  </div>;
+}
+
+function CustomerModal({ title, initialForm, customerId, actions, onClose }) {
+  const [form,setForm]=useState({
+    name:initialForm.name||"", contact:initialForm.contact||"", phone:initialForm.phone||"",
+    email:initialForm.email||"", address_line1:initialForm.address_line1||"",
+    address_line2:initialForm.address_line2||"", city:initialForm.city||"",
+    state:initialForm.state||"", zip:initialForm.zip||""
+  });
+  const [saving,setSaving]=useState(false);
+  const f=k=>e=>setForm(p=>({...p,[k]:e.target.value}));
+
+  async function save(){
+    if(!form.name)return;
+    setSaving(true);
+    try {
+      if(customerId) await actions.updateCustomer(customerId,form);
+      else await actions.addCustomer(form);
+      onClose();
+    } catch(e){ alert(e.message); setSaving(false); }
+  }
+
+  return <Modal title={title} onClose={onClose}>
+    <div style={{display:"grid",gap:14}}>
+      <Input label="Company Name *" value={form.name} onChange={f("name")} placeholder="e.g. Murphy Builders"/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Input label="Contact Name" value={form.contact} onChange={f("contact")} placeholder="Full name"/>
+        <Input label="Phone" value={form.phone} onChange={f("phone")} placeholder="(555) 000-0000"/>
+      </div>
+      <Input label="Email" value={form.email} onChange={f("email")} placeholder="orders@company.com"/>
+      <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
+        <SectionTitle>Ship To Address</SectionTitle>
+        <div style={{display:"grid",gap:10}}>
+          <Input label="Address Line 1" value={form.address_line1} onChange={f("address_line1")} placeholder="808 Boardman Dr"/>
+          <Input label="Address Line 2" value={form.address_line2} onChange={f("address_line2")} placeholder="Suite 100 (optional)"/>
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:10}}>
+            <Input label="City" value={form.city} onChange={f("city")} placeholder="Gallup"/>
+            <Input label="State" value={form.state} onChange={f("state")} placeholder="NM"/>
+            <Input label="ZIP" value={form.zip} onChange={f("zip")} placeholder="87301"/>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
+        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={!form.name||saving}>{saving?"Saving…":customerId?"Save Changes":"Add Customer"}</Btn>
+      </div>
+    </div>
+  </Modal>;
+}
+
 // ─── Suppliers Tab ────────────────────────────────────────────────────────────
 function SuppliersTab({ suppliers, parts, actions }) {
   const [showAdd,setShowAdd]=useState(false);
@@ -1162,7 +1287,7 @@ function InventoryTab({ parts, suppliers }) {
 }
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
-function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
+function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, actions }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
@@ -1180,6 +1305,7 @@ function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
                 <Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge>
                 {lp.packing_slip_type&&<Badge color="gray">📋 {lp.packing_slip_type}</Badge>}
               </div>
+              {(()=>{const c=customers?.find(x=>x.id===lp.customer_id);return c?<div style={{fontSize:13,fontWeight:600,color:C.navy,marginBottom:2}}>🏢 {c.name}</div>:null;})()}
               <div style={{fontSize:13,color:C.textMid}}>→ {lp.destination}</div>
               <div style={{fontSize:11,color:C.textLight,marginTop:2,display:"flex",gap:12,flexWrap:"wrap"}}>
                 <span>Created {lp.createdAt||lp.created_at}</span>
@@ -1196,13 +1322,13 @@ function LicensePlatesTab({ lps, parts, packingSlipTypes, actions }) {
       ))}
       {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
     </div>
-    {showCreate&&<CreateLpModal parts={parts} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setViewLp(null)}/>}
+    {showCreate&&<CreateLpModal parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
+    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setViewLp(null)}/>}
   </div>;
 }
 
-function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
-  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:"",quote_number:"",po_number:""});
+function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose }) {
+  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:"",quote_number:"",po_number:"",customer_id:""});
   const [items,setItems]=useState([]);
   const [pickPart,setPickPart]=useState(""); const [pickQty,setPickQty]=useState(1);
   const [saving,setSaving]=useState(false);
@@ -1220,7 +1346,16 @@ function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
         <Sel label="Type" value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Outbound</option><option>Inbound</option><option>Transfer</option></Sel>
         <Sel label="Status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}><option>Pending</option><option>Shipped</option><option>Received</option></Sel>
       </div>
-      <Input label="Destination / Ship To" value={form.destination} onChange={e=>setForm(f=>({...f,destination:e.target.value}))} placeholder="Customer or manufacturer name"/>
+      <Field label="Customer">
+        <select value={form.customer_id} onChange={e=>{
+          const c=customers.find(x=>x.id===e.target.value);
+          setForm(f=>({...f,customer_id:e.target.value,destination:c?c.name:f.destination}));
+        }} style={{...inputStyle,width:"100%"}}>
+          <option value="">Select customer…</option>
+          {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </Field>
+      <Input label="Destination / Ship To" value={form.destination} onChange={e=>setForm(f=>({...f,destination:e.target.value}))} placeholder="Customer or location name"/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
         <Input label="Quote Number" value={form.quote_number} onChange={e=>setForm(f=>({...f,quote_number:e.target.value}))} placeholder="e.g. 4113"/>
         <Input label="P.O. Number" value={form.po_number} onChange={e=>setForm(f=>({...f,po_number:e.target.value}))} placeholder="e.g. 26-200-02"/>
@@ -1263,14 +1398,16 @@ function CreateLpModal({ parts, packingSlipTypes, actions, onClose }) {
   </Modal>;
 }
 
-function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
+function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClose }) {
   const isPending = lp.status === "Pending";
   const [status,setStatus]=useState(lp.status);
   const [destination,setDestination]=useState(lp.destination||"");
   const [type,setType]=useState(lp.type||"Outbound");
+  const [customerId,setCustomerId]=useState(lp.customer_id||"");
   const [packingSlipType,setPackingSlipType]=useState(lp.packing_slip_type||"");
   const [quoteNumber,setQuoteNumber]=useState(lp.quote_number||"");
   const [poNumber,setPoNumber]=useState(lp.po_number||"");
+  const customer=customers?.find(c=>c.id===(customerId||lp.customer_id));
   const [items,setItems]=useState(lp.items||[]);
   const [addPartId,setAddPartId]=useState("");
   const [addQty,setAddQty]=useState(1);
@@ -1281,7 +1418,7 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
   async function save(){
     setSaving(true);
     if(isPending){
-      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null});
+      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null,customer_id:customerId||null});
     } else {
       await actions.updateLPStatus(lp.id,status);
     }
@@ -1335,9 +1472,19 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
                 <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
               </Sel>
             </div>
+            <Field label="Customer">
+              <select value={customerId} onChange={e=>{
+                const c=customers?.find(x=>x.id===e.target.value);
+                setCustomerId(e.target.value);
+                if(c) setDestination(c.name);
+              }} style={{...inputStyle,width:"100%"}}>
+                <option value="">Select customer…</option>
+                {(customers||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </Field>
             <Field label="Destination">
               <input value={destination} onChange={e=>setDestination(e.target.value)}
-                placeholder="Customer or manufacturer name" style={{...inputStyle,width:"100%"}}/>
+                placeholder="Customer or location name" style={{...inputStyle,width:"100%"}}/>
             </Field>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
               <Field label="Quote Number">
@@ -1373,6 +1520,12 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
                   <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
               ))}
             </div>
+            {customer&&<div style={{background:C.offWhite,borderRadius:6,padding:"10px 14px"}}>
+              <div style={{fontSize:10,fontWeight:700,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>Customer</div>
+              <div style={{fontWeight:700,fontSize:14,color:C.navy}}>{customer.name}</div>
+              {(customer.address_line1||customer.city)&&<div style={{fontSize:12,color:C.textMid,marginTop:2}}>{[customer.address_line1,customer.city,customer.state,customer.zip].filter(Boolean).join(", ")}</div>}
+              {customer.phone&&<div style={{fontSize:12,color:C.textMid}}>📞 {customer.phone}</div>}
+            </div>}
             {lp.packing_slip_type&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Packing Slip Type</div><Badge color="gray">📋 {lp.packing_slip_type}</Badge></div>}
             {(lp.quote_number||lp.po_number)&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
               {lp.quote_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Quote Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.quote_number}</div></div>}
@@ -1445,12 +1598,13 @@ function LpDetailModal({ lp, parts, packingSlipTypes, actions, onClose }) {
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,loading,error,actions}=useData();
+  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
     {id:"parts",label:"Parts Catalog",icon:"🔩"},
     {id:"suppliers",label:"Suppliers",icon:"🏭"},
+    {id:"customers",label:"Customers",icon:"🏢"},
     {id:"inventory",label:"Inventory",icon:"📦"},
     {id:"lp",label:"License Plates",icon:"🏷️"},
     {id:"audit",label:"Audit Log",icon:"📋"},
@@ -1498,8 +1652,9 @@ function MainApp({ user, onSignOut }) {
           :tab==="scan"?<ScanTab parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
+          :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
-          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
+          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="audit"?<AuditLogTab/>
           :null}
       </div>
