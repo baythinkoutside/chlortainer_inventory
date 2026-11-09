@@ -1,5 +1,6 @@
 // ChlorTainer Inventory System v2.1
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useId } from "react";
+import { forecast, FIRM_STATUSES } from "./replenishment.js";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -263,12 +264,23 @@ function useData() {
   const [supplierStock,setSupplierStock]=useState([]);
   const [packingSlipTypes,setPackingSlipTypes]=useState([]);
   const [customers,setCustomers]=useState([]);
+  const [vesselModels,setVesselModels]=useState([]);
+  const [controlLines,setControlLines]=useState([]);
+  const [orders,setOrders]=useState([]);
+  const [orderLines,setOrderLines]=useState([]);
+  const [maintKits,setMaintKits]=useState([]);
+  const [kitLines,setKitLines]=useState([]);
+  const [maintLines,setMaintLines]=useState([]);
+  const [procurement,setProcurement]=useState([]);
+  const [purchaseOrders,setPurchaseOrders]=useState([]);
+  const [poLines,setPoLines]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
   const fetchAll = async () => {
     const sb = _sb;
-    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst},{data:custs}] = await Promise.all([
+    const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst},{data:custs},
+           {data:vms},{data:cls},{data:ords},{data:ols},{data:kits},{data:kls},{data:mls},{data:procs},{data:pos},{data:pols}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
@@ -277,6 +289,16 @@ function useData() {
       sb.from("supplier_stock").select("*"),
       sb.from("packing_slip_types").select("*").order("sort_order"),
       sb.from("customers").select("*").order("name"),
+      sb.from("vessel_models").select("*").order("name"),
+      sb.from("control_list_lines").select("*"),
+      sb.from("orders").select("*").order("created_at",{ascending:false}),
+      sb.from("order_lines").select("*").order("created_at"),
+      sb.from("maintenance_kits").select("*").order("name"),
+      sb.from("maintenance_kit_lines").select("*"),
+      sb.from("maintenance_order_lines").select("*").order("created_at"),
+      sb.from("part_procurement").select("*"),
+      sb.from("purchase_orders").select("*").order("created_at",{ascending:false}),
+      sb.from("purchase_order_lines").select("*").order("created_at"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
@@ -287,6 +309,16 @@ function useData() {
     setSupplierStock(supStock||[]);
     setPackingSlipTypes(pst||[]);
     setCustomers(custs||[]);
+    setVesselModels(vms||[]);
+    setControlLines(cls||[]);
+    setOrders(ords||[]);
+    setOrderLines(ols||[]);
+    setMaintKits(kits||[]);
+    setKitLines(kls||[]);
+    setMaintLines(mls||[]);
+    setProcurement(procs||[]);
+    setPurchaseOrders(pos||[]);
+    setPoLines(pols||[]);
   };
 
   useEffect(()=>{
@@ -421,7 +453,150 @@ function useData() {
     await logAudit("customer_delete","customer",id,{});
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer}};
+  // ── Replenishment / orders / purchase orders ────────────────────────────────
+  // Every action writes, logs to the audit trail, then refreshes so the UI updates
+  // immediately (these tables may not be in the realtime publication).
+  const dbRun = async (q) => { const {error} = await q; if(error) throw new Error(error.message); };
+  const newId = (prefix) => `${prefix}-${new Date().toISOString().slice(0,10).replace(/-/g,"")}-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+  const slugId = (prefix,name) => `${prefix}-${name.trim().toUpperCase().replace(/[^A-Z0-9]+/g,"-").replace(/^-|-$/g,"")}`;
+  const numOrNull = (v) => (v===""||v===null||v===undefined||isNaN(+v)) ? null : +v;
+
+  async function saveVesselModel(form){
+    const id = form.id || slugId("VM",form.name);
+    await dbRun(_sb.from("vessel_models").upsert({id,name:form.name.trim(),description:form.description||null}));
+    await logAudit(form.id?"vessel_model_edit":"vessel_model_add","vessel_model",id,{name:form.name});
+    await fetchAll(); return id;
+  }
+  async function deleteVesselModel(id){
+    await dbRun(_sb.from("vessel_models").delete().eq("id",id));
+    await logAudit("vessel_model_delete","vessel_model",id,{}); await fetchAll();
+  }
+  async function saveControlLine(l){
+    await dbRun(_sb.from("control_list_lines").upsert({vessel_model_id:l.vessel_model_id,list_type:l.list_type,part_id:l.part_id,qty_per_unit:+l.qty_per_unit},{onConflict:"vessel_model_id,list_type,part_id"}));
+    await logAudit("control_line_save","vessel_model",l.vessel_model_id,{list_type:l.list_type,part_id:l.part_id,qty_per_unit:+l.qty_per_unit}); await fetchAll();
+  }
+  async function deleteControlLine(line){
+    await dbRun(_sb.from("control_list_lines").delete().eq("id",line.id));
+    await logAudit("control_line_delete","vessel_model",line.vessel_model_id,{list_type:line.list_type,part_id:line.part_id}); await fetchAll();
+  }
+  async function saveKit(form){
+    const id = form.id || slugId("KIT",form.name);
+    await dbRun(_sb.from("maintenance_kits").upsert({id,name:form.name.trim(),description:form.description||null}));
+    await logAudit(form.id?"kit_edit":"kit_add","kit",id,{name:form.name}); await fetchAll(); return id;
+  }
+  async function deleteKit(id){
+    await dbRun(_sb.from("maintenance_kits").delete().eq("id",id));
+    await logAudit("kit_delete","kit",id,{}); await fetchAll();
+  }
+  async function saveKitLine(l){
+    await dbRun(_sb.from("maintenance_kit_lines").upsert({kit_id:l.kit_id,part_id:l.part_id,qty:+l.qty},{onConflict:"kit_id,part_id"}));
+    await logAudit("kit_line_save","kit",l.kit_id,{part_id:l.part_id,qty:+l.qty}); await fetchAll();
+  }
+  async function deleteKitLine(line){
+    await dbRun(_sb.from("maintenance_kit_lines").delete().eq("id",line.id));
+    await logAudit("kit_line_delete","kit",line.kit_id,{part_id:line.part_id}); await fetchAll();
+  }
+  async function updateListType(id,changes){
+    await dbRun(_sb.from("packing_slip_types").update(changes).eq("id",id));
+    await logAudit("list_type_edit","packing_slip_types",id,changes); await fetchAll();
+  }
+
+  async function createOrder(form){
+    const id = newId("ORD");
+    await dbRun(_sb.from("orders").insert({id,order_type:form.order_type,customer_id:form.customer_id||null,quote_number:form.quote_number||null,po_number:form.po_number||null,project_name:form.project_name||null,notes:form.notes||null,status:"Open",created_by:getCurrentUser()?.id||null}));
+    await logAudit("order_create","order",id,{order_type:form.order_type,quote_number:form.quote_number,po_number:form.po_number,project_name:form.project_name});
+    await fetchAll(); return id;
+  }
+  async function updateOrder(id,changes){
+    await dbRun(_sb.from("orders").update(changes).eq("id",id));
+    await logAudit("order_edit","order",id,changes); await fetchAll();
+  }
+  async function deleteOrder(id){
+    await dbRun(_sb.from("orders").delete().eq("id",id));
+    await logAudit("order_delete","order",id,{}); await fetchAll();
+  }
+  async function addOrderLine(f){
+    await dbRun(_sb.from("order_lines").insert({order_id:f.order_id,vessel_model_id:f.vessel_model_id,units:+f.units||1,paint_start_date:f.paint_start_date||null,ship_date:f.ship_date||null,status:f.status||"PO Signed",notes:f.notes||null}));
+    await logAudit("order_line_add","order",f.order_id,{vessel_model_id:f.vessel_model_id,units:+f.units||1,paint_start_date:f.paint_start_date}); await fetchAll();
+  }
+  async function updateOrderLine(line,changes){
+    await dbRun(_sb.from("order_lines").update(changes).eq("id",line.id));
+    await logAudit("order_line_edit","order",line.order_id,{line_id:line.id,vessel_model_id:line.vessel_model_id,before:Object.fromEntries(Object.keys(changes).map(k=>[k,line[k]])),after:changes}); await fetchAll();
+  }
+  async function deleteOrderLine(line){
+    await dbRun(_sb.from("order_lines").delete().eq("id",line.id));
+    await logAudit("order_line_delete","order",line.order_id,{line_id:line.id,vessel_model_id:line.vessel_model_id}); await fetchAll();
+  }
+  async function addMaintLine(f){
+    await dbRun(_sb.from("maintenance_order_lines").insert({order_id:f.order_id,line_type:f.line_type,part_id:f.line_type==="part"?f.part_id:null,kit_id:f.line_type==="kit"?f.kit_id:null,qty:+f.qty,needed_by:f.needed_by||null,notes:f.notes||null}));
+    await logAudit("maint_line_add","order",f.order_id,{line_type:f.line_type,part_id:f.part_id,kit_id:f.kit_id,qty:+f.qty,needed_by:f.needed_by}); await fetchAll();
+  }
+  async function updateMaintLine(line,changes){
+    await dbRun(_sb.from("maintenance_order_lines").update(changes).eq("id",line.id));
+    await logAudit("maint_line_edit","order",line.order_id,{line_id:line.id,before:Object.fromEntries(Object.keys(changes).map(k=>[k,line[k]])),after:changes}); await fetchAll();
+  }
+  async function deleteMaintLine(line){
+    await dbRun(_sb.from("maintenance_order_lines").delete().eq("id",line.id));
+    await logAudit("maint_line_delete","order",line.order_id,{line_id:line.id}); await fetchAll();
+  }
+
+  async function saveProcurement(partId,f){
+    const row = {
+      part_id:partId, policy:f.policy||"order_driven",
+      preferred_supplier_id:f.preferred_supplier_id||null, backup_supplier_id:f.backup_supplier_id||null,
+      lead_time_days:numOrNull(f.lead_time_days), lead_buffer_days:numOrNull(f.lead_buffer_days)??0,
+      service_level:numOrNull(f.service_level)??0.95, moq:numOrNull(f.moq)??1, order_multiple:numOrNull(f.order_multiple)??1,
+      manual_monthly_usage:numOrNull(f.manual_monthly_usage)??0, min_qty:numOrNull(f.min_qty), max_qty:numOrNull(f.max_qty),
+      review_interval_days:numOrNull(f.review_interval_days), notes:f.notes||null, updated_at:new Date().toISOString(),
+    };
+    await dbRun(_sb.from("part_procurement").upsert(row));
+    await logAudit("procurement_save","part",partId,{policy:row.policy,preferred_supplier_id:row.preferred_supplier_id,moq:row.moq,order_multiple:row.order_multiple,service_level:row.service_level});
+    await fetchAll();
+  }
+
+  async function createPurchaseOrder({supplier_id,notes,lines}){
+    const id = newId("PO");
+    await dbRun(_sb.from("purchase_orders").insert({id,supplier_id,status:"Draft",notes:notes||null,created_by:getCurrentUser()?.id||null}));
+    await dbRun(_sb.from("purchase_order_lines").insert(lines.map(l=>({po_id:id,part_id:l.part_id,qty:+l.qty,unit_cost:l.unit_cost??null,mfg_part_no:l.mfg_part_no||null,needed_by:l.needed_by||null,source_orders:l.source_orders||[]}))));
+    await logAudit("po_create","purchase_order",id,{supplier_id,lines:lines.map(l=>({part_id:l.part_id,qty:l.qty}))});
+    await fetchAll(); return id;
+  }
+  async function updatePurchaseOrder(id,changes){
+    const po = purchaseOrders.find(p=>p.id===id);
+    await dbRun(_sb.from("purchase_orders").update(changes).eq("id",id));
+    await logAudit(changes.status&&changes.status!==po?.status?"po_status":"po_edit","purchase_order",id,{before:Object.fromEntries(Object.keys(changes).map(k=>[k,po?.[k]])),after:changes}); await fetchAll();
+  }
+  async function deletePurchaseOrder(id){
+    await dbRun(_sb.from("purchase_orders").delete().eq("id",id));
+    await logAudit("po_delete","purchase_order",id,{}); await fetchAll();
+  }
+  // Receive qty against a PO line: bumps parts.stock and the supplier's own stock row, then rolls up PO status.
+  async function receivePoLine(po,line,qty){
+    qty = +qty;
+    if(!(qty>0)) throw new Error("Enter a quantity greater than zero.");
+    await dbRun(_sb.from("purchase_order_lines").update({qty_received:(+line.qty_received||0)+qty}).eq("id",line.id));
+    const {data:p} = await _sb.from("parts").select("stock").eq("id",line.part_id).single();
+    const before = p?.stock||0;
+    await dbRun(_sb.from("parts").update({stock:before+qty}).eq("id",line.part_id));
+    if(po.supplier_id){
+      const {data:row} = await _sb.from("supplier_stock").select("qty").eq("part_id",line.part_id).eq("supplier_id",po.supplier_id).maybeSingle();
+      await dbRun(_sb.from("supplier_stock").upsert({part_id:line.part_id,supplier_id:po.supplier_id,qty:(row?.qty||0)+qty,updated_at:new Date().toISOString()},{onConflict:"part_id,supplier_id"}));
+    }
+    const {data:all} = await _sb.from("purchase_order_lines").select("qty,qty_received").eq("po_id",po.id);
+    const done = (all||[]).every(l=>(+l.qty_received||0)>=+l.qty);
+    const any = (all||[]).some(l=>(+l.qty_received||0)>0);
+    const status = done ? "Received" : any ? "Partially Received" : po.status;
+    if(status!==po.status) await dbRun(_sb.from("purchase_orders").update({status}).eq("id",po.id));
+    await logAudit("stock_adjust","part",line.part_id,{from:before,to:before+qty,source:"po_receive",po_id:po.id,qty_received:qty,supplier_id:po.supplier_id});
+    await fetchAll();
+  }
+
+  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+    vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
+    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+      saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
+      createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
+      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1796,10 +1971,837 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClos
   </Modal>;
 }
 
+// ═══ REPLENISHMENT UI START ═══════════════════════════════════════════════════
+// ─── Shared helpers for the replenishment tabs ───────────────────────────────
+const localToday = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+const fmtDate = (s) => s ? new Date(s+"T00:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}) : "—";
+const money = (n) => n==null ? "—" : `$${(+n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const LINE_STATUSES = ["PO Signed","Lists Draft","Lists Final","Released","Staged","Shipped","Cancelled"];
+const lineStatusColor = (s) => ({"PO Signed":"gray","Lists Draft":"amber","Lists Final":"blue","Released":"navy","Staged":"navy","Shipped":"green","Cancelled":"red"}[s]||"gray");
+const PO_STATUSES = ["Draft","Sent","Partially Received","Received","Cancelled"];
+const poStatusColor = (s) => ({"Draft":"gray","Sent":"blue","Partially Received":"amber","Received":"green","Cancelled":"red"}[s]||"gray");
+const FLAG_LABELS = {
+  expedite:"Expedite", expedite_open_po:"Chase open PO", po_arrives_late:"PO arrives late", no_supplier:"No supplier",
+  lead_time_unknown:"Lead time unknown", shortage_but_do_not_reorder:"Short · no-reorder item",
+  undated_demand:"Undated demand", paint_start_missing:"Paint date missing",
+};
+const flagColor = (f) => (["expedite","expedite_open_po","po_arrives_late","no_supplier","shortage_but_do_not_reorder"].includes(f) ? "red" : "amber");
+
+function useRun(){
+  const [busy,setBusy]=useState(false);
+  const run=async(fn)=>{ setBusy(true); try{ await fn(); return true; }catch(e){ alert(e.message||String(e)); return false; }finally{ setBusy(false); } };
+  return [busy,run];
+}
+
+function SubTabs({ value, onChange, items }) {
+  return <div style={{display:"flex",gap:8,marginBottom:18,flexWrap:"wrap"}}>
+    {items.map(([id,label])=><button key={id} onClick={()=>onChange(id)} style={{background:value===id?C.navy:C.white,color:value===id?C.amber:C.navy,border:`1.5px solid ${value===id?C.navy:C.border}`,borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:700,cursor:"pointer"}}>{label}</button>)}
+  </div>;
+}
+
+// Type or pick a SKU from the catalog (works with 100+ parts).
+function PartPicker({ parts, value, onChange, placeholder="Type or pick a SKU…" }) {
+  const listId = useId();
+  const match = parts.find(p=>p.id===value);
+  return <div>
+    <input list={listId} value={value} onChange={e=>onChange(e.target.value.trim())} placeholder={placeholder} style={{...inputStyle,width:"100%",fontFamily:"monospace"}}/>
+    <datalist id={listId}>{parts.map(p=><option key={p.id} value={p.id}>{p.description}</option>)}</datalist>
+    {value&&<div style={{fontSize:11,marginTop:3,color:match?C.textMid:C.red}}>{match?match.description:"No matching SKU"}</div>}
+  </div>;
+}
+
+function downloadCsv(filename, rows){
+  const cell=(v)=>{ const t=String(v ?? ""); return /[",\n]/.test(t) ? `"${t.replace(/"/g,'""')}"` : t; };
+  const blob=new Blob([rows.map(r=>r.map(cell).join(",")).join("\n")],{type:"text/csv"});
+  const url=URL.createObjectURL(blob); const a=document.createElement("a");
+  a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url);
+}
+
+function printPurchaseOrder({ po, supplier, lines, parts }) {
+  const rows=lines.map(l=>{
+    const p=parts.find(x=>x.id===l.part_id);
+    const ext=l.unit_cost!=null?l.qty*l.unit_cost:null;
+    return `<tr><td class="m">${esc(l.part_id)}</td><td class="m">${esc(l.mfg_part_no||"—")}</td><td>${esc(p?.description||"")}</td><td class="r">${esc(l.qty)}</td><td class="r">${l.unit_cost!=null?esc(money(l.unit_cost)):"—"}</td><td class="r">${ext!=null?esc(money(ext)):"—"}</td><td>${esc(fmtDate(l.needed_by))}</td></tr>`;
+  }).join("");
+  const total=lines.reduce((s,l)=>s+(l.unit_cost!=null?l.qty*l.unit_cost:0),0);
+  const w=window.open("","_blank");
+  if(!w){ alert("Allow pop-ups to print."); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>${esc(po.id||"Draft PO")}</title><style>
+    *{box-sizing:border-box}body{font-family:Arial,sans-serif;padding:28px;color:#1C2B3A;max-width:820px;margin:0 auto}
+    .top{display:flex;justify-content:space-between;border-bottom:4px solid #F5A623;padding-bottom:10px;margin-bottom:16px}
+    h1{margin:0;font-size:22px}.sub{font-size:11px;color:#8A9BB0;letter-spacing:2px;text-transform:uppercase}
+    .po{text-align:right}.po b{font-size:18px;font-family:monospace}
+    .meta{display:flex;gap:40px;margin-bottom:16px;font-size:12px}.meta div b{display:block;font-size:10px;color:#8A9BB0;text-transform:uppercase;letter-spacing:.6px;margin-bottom:2px}
+    table{width:100%;border-collapse:collapse;font-size:12px}th{background:#1C2B3A;color:#fff;text-align:left;padding:7px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+    td{padding:7px 8px;border-bottom:1px solid #E0E3E7}.m{font-family:monospace}.r{text-align:right}
+    .total{text-align:right;margin-top:12px;font-size:15px;font-weight:700}.notes{margin-top:18px;font-size:12px;color:#4A5568}
+    @media print{body{padding:8px}}</style></head><body onload="window.print()">
+    <div class="top"><div><h1>ChlorTainer</h1><div class="sub">TGO Technologies, Inc. · Purchase Order</div></div>
+    <div class="po"><b>${esc(po.id||"DRAFT")}</b><div>${esc(po.status||"Draft")}</div></div></div>
+    <div class="meta">
+      <div><b>Supplier</b>${esc(supplier?.name||"—")}<br>${esc(supplier?.contact||"")}<br>${esc(supplier?.phone||"")}</div>
+      <div><b>Order date</b>${esc(fmtDate(po.order_date))}</div>
+      <div><b>Expected</b>${esc(fmtDate(po.expected_date))}</div>
+    </div>
+    <table><thead><tr><th>SKU</th><th>Supplier Part No.</th><th>Description</th><th class="r">Qty</th><th class="r">Unit</th><th class="r">Extended</th><th>Needed by</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="total">Total: ${esc(money(total))}</div>
+    ${po.notes?`<div class="notes"><b>Notes:</b> ${esc(po.notes)}</div>`:""}
+  </body></html>`);
+  w.document.close();
+}
+
+// ─── Control Lists Tab ───────────────────────────────────────────────────────
+function NewNameForm({ label, onCreate, onCancel }) {
+  const [name,setName]=useState(""); const [desc,setDesc]=useState(""); const [busy,run]=useRun();
+  return <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:8,padding:12,display:"grid",gap:8,marginBottom:12}}>
+    <Input label={label} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Dual 150"/>
+    <Input label="Description (optional)" value={desc} onChange={e=>setDesc(e.target.value)}/>
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+      <Btn variant="outline" onClick={onCancel}>Cancel</Btn>
+      <Btn disabled={!name.trim()||busy} onClick={()=>run(async()=>{await onCreate({name,description:desc});})}>{busy?"Saving…":"Create"}</Btn>
+    </div>
+  </div>;
+}
+
+function NameHeader({ record, onSave, onDelete, deleteLabel }) {
+  const [name,setName]=useState(record.name); const [desc,setDesc]=useState(record.description||""); const [busy,run]=useRun();
+  const dirty = name!==record.name || desc!==(record.description||"");
+  return <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:12,display:"grid",gap:10}}>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <Input label="Name" value={name} onChange={e=>setName(e.target.value)}/>
+      <Input label="Description" value={desc} onChange={e=>setDesc(e.target.value)}/>
+    </div>
+    <div style={{display:"flex",gap:8,justifyContent:"space-between",alignItems:"center"}}>
+      <span style={{fontFamily:"monospace",fontSize:11,color:C.textLight}}>{record.id}</span>
+      <div style={{display:"flex",gap:8}}>
+        <Btn variant="danger" disabled={busy} onClick={()=>{ if(window.confirm(`${deleteLabel} "${record.name}"? This cannot be undone.`)) run(()=>onDelete(record.id)); }}>Delete</Btn>
+        <Btn disabled={!dirty||!name.trim()||busy} onClick={()=>run(()=>onSave({id:record.id,name,description:desc}))}>{busy?"Saving…":"Save"}</Btn>
+      </div>
+    </div>
+  </div>;
+}
+
+function LineEditor({ title, subtitle, lines, parts, qtyLabel, onAdd, onQty, onRemove }) {
+  const [partId,setPartId]=useState(""); const [qty,setQty]=useState(1); const [busy,run]=useRun();
+  const valid = parts.some(p=>p.id===partId) && +qty>0;
+  const q = (l) => l.qty_per_unit ?? l.qty;
+  return <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:12}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8,gap:8,flexWrap:"wrap"}}>
+      <span style={{fontWeight:800,fontSize:14,color:C.navy}}>{title} <span style={{fontWeight:600,color:C.textLight,fontSize:12}}>({lines.length})</span></span>
+      <span style={{fontSize:11,color:C.textLight}}>{subtitle}</span>
+    </div>
+    {lines.length===0&&<div style={{fontSize:12,color:C.textLight,padding:"6px 0"}}>No parts yet.</div>}
+    {lines.map(l=>{
+      const p=parts.find(x=>x.id===l.part_id);
+      return <div key={l.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:`1px solid ${C.border}`,flexWrap:"wrap"}}>
+        <span style={{fontFamily:"monospace",fontSize:12,color:C.amber,fontWeight:700,minWidth:96}}>{l.part_id}</span>
+        <span style={{flex:"1 1 160px",fontSize:12,color:C.textMid}}>{p?.description||"—"}</span>
+        <input key={l.id+":"+q(l)} type="number" min="0.01" step="any" defaultValue={q(l)}
+          onBlur={e=>{const v=+e.target.value; if(v>0&&v!==+q(l)) run(()=>onQty(l,v));}}
+          style={{...inputStyle,width:70,padding:"4px 8px",textAlign:"center",fontFamily:"monospace",fontWeight:700}}/>
+        <span style={{fontSize:11,color:C.textLight,minWidth:54}}>{qtyLabel}</span>
+        <button disabled={busy} onClick={()=>{ if(window.confirm(`Remove ${l.part_id}?`)) run(()=>onRemove(l)); }}
+          style={{width:26,height:26,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:12}}>✕</button>
+      </div>;
+    })}
+    <div style={{display:"flex",gap:8,marginTop:10,alignItems:"flex-start",flexWrap:"wrap"}}>
+      <div style={{flex:"2 1 200px"}}><PartPicker parts={parts} value={partId} onChange={setPartId}/></div>
+      <input type="number" min="0.01" step="any" value={qty} onChange={e=>setQty(e.target.value)} style={{...inputStyle,width:70,textAlign:"center",fontFamily:"monospace"}}/>
+      <Btn variant="outline" disabled={!valid||busy} onClick={()=>run(async()=>{await onAdd(partId,+qty);setPartId("");setQty(1);})}>+ Add</Btn>
+    </div>
+  </div>;
+}
+
+function ControlListsTab({ vesselModels, controlLines, maintKits, kitLines, parts, packingSlipTypes, actions }) {
+  const [view,setView]=useState("models");
+  const [modelId,setModelId]=useState(null);
+  const [kitId,setKitId]=useState(null);
+  const [showNew,setShowNew]=useState(false);
+  const model = vesselModels.find(m=>m.id===modelId) || null;
+  const kit = maintKits.find(k=>k.id===kitId) || null;
+
+  const pickList = (items, countOf, selectedId, onSelect, newLabel) => (
+    <div style={{flex:"1 1 220px",maxWidth:300}}>
+      <Btn style={{width:"100%",justifyContent:"center",marginBottom:10}} onClick={()=>setShowNew(true)}>+ {newLabel}</Btn>
+      {items.map(it=><button key={it.id} onClick={()=>onSelect(it.id)} style={{display:"block",width:"100%",textAlign:"left",background:selectedId===it.id?C.navy:C.white,color:selectedId===it.id?C.white:C.navy,border:`1.5px solid ${selectedId===it.id?C.navy:C.border}`,borderRadius:7,padding:"10px 12px",marginBottom:8,cursor:"pointer"}}>
+        <div style={{fontWeight:800,fontSize:13}}>{it.name}</div>
+        <div style={{fontSize:11,opacity:.75,marginTop:2}}>{countOf(it)} part line(s)</div>
+      </button>)}
+      {items.length===0&&<div style={{fontSize:12,color:C.textLight,textAlign:"center",padding:20}}>None yet.</div>}
+    </div>
+  );
+
+  return <div>
+    <SubTabs value={view} onChange={v=>{setView(v);setShowNew(false);}} items={[["models","🚢 Vessel Models"],["kits","🧰 Maintenance Kits"],["picktime","⏱ Pick Time"]]}/>
+
+    {view==="models"&&<div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"flex-start"}}>
+      {pickList(vesselModels, m=>controlLines.filter(c=>c.vessel_model_id===m.id).length, modelId, setModelId, "New Vessel Model")}
+      <div style={{flex:"3 1 360px",minWidth:0}}>
+        {showNew&&<NewNameForm label="Vessel model name" onCancel={()=>setShowNew(false)} onCreate={async f=>{const id=await actions.saveVesselModel(f);setModelId(id);setShowNew(false);}}/>}
+        {!model&&!showNew&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>Select a vessel model to edit its control lists, or create one.</div>}
+        {model&&<>
+          <NameHeader key={model.id} record={model} onSave={actions.saveVesselModel} onDelete={async id=>{await actions.deleteVesselModel(id);setModelId(null);}} deleteLabel="Delete vessel model"/>
+          {packingSlipTypes.map(t=><LineEditor key={t.id} title={t.name} subtitle={`Staged ${t.lead_buffer_days??0} day(s) before paint start`}
+            lines={controlLines.filter(c=>c.vessel_model_id===model.id&&c.list_type===t.name)} parts={parts} qtyLabel="per vessel"
+            onAdd={(partId,qty)=>actions.saveControlLine({vessel_model_id:model.id,list_type:t.name,part_id:partId,qty_per_unit:qty})}
+            onQty={(l,v)=>actions.saveControlLine({...l,qty_per_unit:v})} onRemove={actions.deleteControlLine}/>)}
+        </>}
+      </div>
+    </div>}
+
+    {view==="kits"&&<div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"flex-start"}}>
+      {pickList(maintKits, k=>kitLines.filter(l=>l.kit_id===k.id).length, kitId, setKitId, "New Kit")}
+      <div style={{flex:"3 1 360px",minWidth:0}}>
+        {showNew&&<NewNameForm label="Kit name" onCancel={()=>setShowNew(false)} onCreate={async f=>{const id=await actions.saveKit(f);setKitId(id);setShowNew(false);}}/>}
+        {!kit&&!showNew&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>Select a kit to edit its contents, or create one (e.g. an annual service kit).</div>}
+        {kit&&<>
+          <NameHeader key={kit.id} record={kit} onSave={actions.saveKit} onDelete={async id=>{await actions.deleteKit(id);setKitId(null);}} deleteLabel="Delete kit"/>
+          <LineEditor title="Kit contents" subtitle="Parts used each time this kit is ordered" lines={kitLines.filter(l=>l.kit_id===kit.id)} parts={parts} qtyLabel="per kit"
+            onAdd={(partId,qty)=>actions.saveKitLine({kit_id:kit.id,part_id:partId,qty})}
+            onQty={(l,v)=>actions.saveKitLine({kit_id:l.kit_id,part_id:l.part_id,qty:v})} onRemove={actions.deleteKitLine}/>
+        </>}
+      </div>
+    </div>}
+
+    {view==="picktime"&&<div style={{maxWidth:560}}>
+      <div style={{background:C.warnBg,border:`1px solid ${C.warnBdr}`,borderRadius:8,padding:"10px 14px",fontSize:12,color:C.warnText,marginBottom:14}}>
+        Parts ship when vessels pass hydro and move to paint. Each list must be picked, boxed and staged this many days <strong>before</strong> the planned paint-start date, so parts must be on hand by then. If parts are still on order, picking waits for receipt.
+      </div>
+      {packingSlipTypes.map(t=><div key={t.id} style={{display:"flex",alignItems:"center",gap:12,background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"12px 16px",marginBottom:8}}>
+        <span style={{flex:1,fontWeight:700,color:C.navy}}>{t.name}</span>
+        <input key={t.id+":"+t.lead_buffer_days} type="number" min="0" step="1" defaultValue={t.lead_buffer_days??0}
+          onBlur={e=>{const v=Math.max(0,Math.round(+e.target.value||0)); if(v!==(t.lead_buffer_days??0)) actions.updateListType(t.id,{lead_buffer_days:v}).catch(err=>alert(err.message));}}
+          style={{...inputStyle,width:72,textAlign:"center",fontFamily:"monospace",fontWeight:700}}/>
+        <span style={{fontSize:12,color:C.textLight,minWidth:120}}>days before paint start</span>
+      </div>)}
+    </div>}
+  </div>;
+}
+
+// ─── Orders Tab (manufacturing vessel orders + customer maintenance POs) ──────
+function NewOrderModal({ customers, actions, onClose, onCreated }) {
+  const [f,setF]=useState({order_type:"manufacturing",customer_id:"",quote_number:"",po_number:"",project_name:"",notes:""});
+  const [busy,run]=useRun();
+  const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
+  return <Modal title="New Order" onClose={onClose}>
+    <div style={{display:"grid",gap:12}}>
+      <Sel label="Order type" value={f.order_type} onChange={set("order_type")}>
+        <option value="manufacturing">Manufacturing — vessel build (control lists)</option>
+        <option value="maintenance">Maintenance — customer purchase order (parts / kits)</option>
+      </Sel>
+      <Sel label="Customer" value={f.customer_id} onChange={set("customer_id")}>
+        <option value="">Select customer…</option>
+        {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+      </Sel>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Input label="Quote number" value={f.quote_number} onChange={set("quote_number")} placeholder="e.g. 4113"/>
+        <Input label="Customer P.O. number" value={f.po_number} onChange={set("po_number")} placeholder="e.g. 26-200-02"/>
+      </div>
+      <Input label="Project name" value={f.project_name} onChange={set("project_name")} placeholder="e.g. Gallup G-80 POD 8 and 13"/>
+      <Input label="Notes" value={f.notes} onChange={set("notes")}/>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
+        <Btn disabled={busy} onClick={()=>run(async()=>{const id=await actions.createOrder(f);onCreated(id);})}>{busy?"Creating…":"Create Order"}</Btn>
+      </div>
+    </div>
+  </Modal>;
+}
+
+function VesselLines({ order, lines, vesselModels, controlLines, actions }) {
+  const [busy,run]=useRun();
+  const [add,setAdd]=useState({vessel_model_id:"",units:1,paint_start_date:"",ship_date:""});
+  const modelName=(id)=>vesselModels.find(m=>m.id===id)?.name||id;
+  const nextOf=(s)=>{const i=LINE_STATUSES.indexOf(s); return (i>=0&&i<LINE_STATUSES.indexOf("Shipped"))?LINE_STATUSES[i+1]:null;};
+  return <div>
+    {lines.length===0&&<div style={{fontSize:12,color:C.textLight,padding:"8px 0"}}>No vessels on this order yet.</div>}
+    {lines.map(ol=>{
+      const counts=controlLines.filter(c=>c.vessel_model_id===ol.vessel_model_id);
+      const firm=FIRM_STATUSES.includes(ol.status);
+      const next=nextOf(ol.status);
+      return <div key={ol.id} style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:10,background:C.white}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontWeight:800,color:C.navy,fontSize:14}}>{modelName(ol.vessel_model_id)}</span>
+            <Badge color={lineStatusColor(ol.status)}>{ol.status}</Badge>
+            {!["Shipped","Cancelled"].includes(ol.status)&&<Badge color={firm?"green":"amber"}>{firm?"Firm demand":"Tentative"}</Badge>}
+          </div>
+          <button disabled={busy} onClick={()=>{if(window.confirm("Remove this vessel line?"))run(()=>actions.deleteOrderLine(ol));}} style={{width:26,height:26,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:12}}>✕</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:10,alignItems:"end"}}>
+          <Field label="Vessels">
+            <input key={ol.id+":u"+ol.units} type="number" min="1" step="1" defaultValue={ol.units} style={{...inputStyle,fontFamily:"monospace",fontWeight:700}}
+              onBlur={e=>{const v=Math.max(1,Math.round(+e.target.value||1)); if(v!==ol.units)run(()=>actions.updateOrderLine(ol,{units:v}));}}/>
+          </Field>
+          <Field label="Paint start (planned)">
+            <input key={ol.id+":p"+ol.paint_start_date} type="date" defaultValue={ol.paint_start_date||""} style={inputStyle}
+              onBlur={e=>{const v=e.target.value||null; if(v!==(ol.paint_start_date||null))run(()=>actions.updateOrderLine(ol,{paint_start_date:v}));}}/>
+          </Field>
+          <Field label="Ship date (optional)">
+            <input key={ol.id+":s"+ol.ship_date} type="date" defaultValue={ol.ship_date||""} style={inputStyle}
+              onBlur={e=>{const v=e.target.value||null; if(v!==(ol.ship_date||null))run(()=>actions.updateOrderLine(ol,{ship_date:v}));}}/>
+          </Field>
+          <Field label="Status">
+            <select value={ol.status} disabled={busy} style={inputStyle} onChange={e=>run(()=>actions.updateOrderLine(ol,{status:e.target.value}))}>
+              {LINE_STATUSES.map(s=><option key={s}>{s}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginTop:10}}>
+          <div style={{fontSize:11,color:C.textMid}}>
+            {packingTypeSummary(counts)}
+            {counts.length===0&&<span style={{color:C.red,fontWeight:700}}>⚠ No control list for this model — nothing will be forecast.</span>}
+            {!ol.paint_start_date&&<div style={{color:C.warnText,fontWeight:700,marginTop:2}}>⚠ Set the planned paint-start date — all parts are dated from it.</div>}
+          </div>
+          {next&&<Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} disabled={busy}
+            onClick={()=>{if(next==="Shipped"&&!window.confirm("Mark as shipped? Parts leave for the manufacturer."))return; run(()=>actions.updateOrderLine(ol,{status:next}));}}>→ {next}</Btn>}
+        </div>
+      </div>;
+    })}
+    <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:8,padding:12}}>
+      <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:8}}>+ Add vessels</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,alignItems:"end"}}>
+        <Sel value={add.vessel_model_id} onChange={e=>setAdd(a=>({...a,vessel_model_id:e.target.value}))}>
+          <option value="">Vessel model…</option>{vesselModels.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
+        </Sel>
+        <input type="number" min="1" value={add.units} onChange={e=>setAdd(a=>({...a,units:e.target.value}))} style={{...inputStyle,fontFamily:"monospace"}} title="Number of vessels"/>
+        <input type="date" value={add.paint_start_date} onChange={e=>setAdd(a=>({...a,paint_start_date:e.target.value}))} style={inputStyle} title="Planned paint start"/>
+        <Btn variant="outline" disabled={!add.vessel_model_id||busy} onClick={()=>run(async()=>{await actions.addOrderLine({order_id:order.id,...add});setAdd({vessel_model_id:"",units:1,paint_start_date:"",ship_date:""});})}>Add</Btn>
+      </div>
+      {vesselModels.length===0&&<div style={{fontSize:11,color:C.red,marginTop:6}}>Create a vessel model on the Control Lists tab first.</div>}
+    </div>
+  </div>;
+}
+
+function packingTypeSummary(counts){
+  if(!counts.length) return null;
+  const by={}; counts.forEach(c=>{by[c.list_type]=(by[c.list_type]||0)+1;});
+  return <span>Control list: {Object.entries(by).map(([k,v])=>`${k} ${v}`).join(" · ")} part line(s). </span>;
+}
+
+function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions }) {
+  const [busy,run]=useRun();
+  const [add,setAdd]=useState({line_type:"part",part_id:"",kit_id:"",qty:1,needed_by:""});
+  const valid = +add.qty>0 && (add.line_type==="part" ? parts.some(p=>p.id===add.part_id) : !!add.kit_id);
+  return <div>
+    {lines.length===0&&<div style={{fontSize:12,color:C.textLight,padding:"8px 0"}}>No lines on this purchase order yet.</div>}
+    {lines.map(ml=>{
+      const p=parts.find(x=>x.id===ml.part_id); const k=maintKits.find(x=>x.id===ml.kit_id);
+      const kitSize=ml.line_type==="kit"?kitLines.filter(l=>l.kit_id===ml.kit_id).length:0;
+      return <div key={ml.id} style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,marginBottom:10,background:C.white}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <Badge color={ml.line_type==="kit"?"navy":"blue"}>{ml.line_type==="kit"?"Kit":"Part"}</Badge>
+            {ml.line_type==="kit"
+              ? <span style={{fontWeight:800,color:C.navy,fontSize:13}}>{k?.name||ml.kit_id} <span style={{fontWeight:500,color:C.textLight,fontSize:11}}>({kitSize} part line(s))</span></span>
+              : <span><span style={{fontFamily:"monospace",fontSize:12,color:C.amber,fontWeight:700}}>{ml.part_id}</span> <span style={{fontSize:12,color:C.textMid}}>{p?.description}</span></span>}
+          </div>
+          <button disabled={busy} onClick={()=>{if(window.confirm("Remove this line?"))run(()=>actions.deleteMaintLine(ml));}} style={{width:26,height:26,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:12}}>✕</button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:10,alignItems:"end"}}>
+          <Field label={ml.line_type==="kit"?"Kits":"Quantity"}>
+            <input key={ml.id+":q"+ml.qty} type="number" min="1" step="any" defaultValue={ml.qty} style={{...inputStyle,fontFamily:"monospace",fontWeight:700}}
+              onBlur={e=>{const v=+e.target.value; if(v>0&&v!==+ml.qty)run(()=>actions.updateMaintLine(ml,{qty:v}));}}/>
+          </Field>
+          <Field label="Needed by">
+            <input key={ml.id+":n"+ml.needed_by} type="date" defaultValue={ml.needed_by||""} style={inputStyle}
+              onBlur={e=>{const v=e.target.value||null; if(v!==(ml.needed_by||null))run(()=>actions.updateMaintLine(ml,{needed_by:v}));}}/>
+          </Field>
+          <Field label="Status">
+            <select value={ml.status} disabled={busy} style={inputStyle} onChange={e=>run(()=>actions.updateMaintLine(ml,{status:e.target.value}))}>
+              {["Open","Shipped","Cancelled"].map(s=><option key={s}>{s}</option>)}
+            </select>
+          </Field>
+        </div>
+        {!ml.needed_by&&ml.status==="Open"&&<div style={{color:C.warnText,fontSize:11,fontWeight:700,marginTop:6}}>⚠ No needed-by date — treated as needed today.</div>}
+      </div>;
+    })}
+    <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:8,padding:12}}>
+      <div style={{fontSize:12,fontWeight:700,color:C.navy,marginBottom:8}}>+ Add line</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,alignItems:"start"}}>
+        <Sel value={add.line_type} onChange={e=>setAdd(a=>({...a,line_type:e.target.value,part_id:"",kit_id:""}))}>
+          <option value="part">Part (SKU)</option><option value="kit">Maintenance kit</option>
+        </Sel>
+        {add.line_type==="part"
+          ? <PartPicker parts={parts} value={add.part_id} onChange={v=>setAdd(a=>({...a,part_id:v}))}/>
+          : <Sel value={add.kit_id} onChange={e=>setAdd(a=>({...a,kit_id:e.target.value}))}><option value="">Select kit…</option>{maintKits.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</Sel>}
+        <input type="number" min="1" step="any" value={add.qty} onChange={e=>setAdd(a=>({...a,qty:e.target.value}))} style={{...inputStyle,fontFamily:"monospace"}} title="Quantity"/>
+        <input type="date" value={add.needed_by} onChange={e=>setAdd(a=>({...a,needed_by:e.target.value}))} style={inputStyle} title="Needed by"/>
+        <Btn variant="outline" disabled={!valid||busy} onClick={()=>run(async()=>{await actions.addMaintLine({order_id:order.id,...add});setAdd({line_type:add.line_type,part_id:"",kit_id:"",qty:1,needed_by:""});})}>Add</Btn>
+      </div>
+    </div>
+  </div>;
+}
+
+function OrderDetailModal({ order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
+  const [f,setF]=useState({customer_id:order.customer_id||"",quote_number:order.quote_number||"",po_number:order.po_number||"",project_name:order.project_name||"",notes:order.notes||"",status:order.status||"Open"});
+  const [busy,run]=useRun();
+  const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
+  const isMaint=(order.order_type||"manufacturing")==="maintenance";
+  const dirty=["customer_id","quote_number","po_number","project_name","notes","status"].some(k=>(f[k]||"")!==(order[k]||(k==="status"?"Open":"")));
+  return <Modal title={order.id} onClose={onClose}>
+    <div style={{display:"grid",gap:14}}>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <Badge color={isMaint?"navy":"blue"}>{isMaint?"Maintenance PO":"Manufacturing"}</Badge>
+        <span style={{fontSize:11,color:C.textLight}}>Created {fmtDate((order.created_at||"").slice(0,10))}</span>
+      </div>
+      <div style={{display:"grid",gap:10,background:C.offWhite,borderRadius:8,padding:12}}>
+        <Sel label="Customer" value={f.customer_id} onChange={set("customer_id")}><option value="">Select customer…</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <Input label="Quote number" value={f.quote_number} onChange={set("quote_number")}/>
+          <Input label="Customer P.O. number" value={f.po_number} onChange={set("po_number")}/>
+        </div>
+        <Input label="Project name" value={f.project_name} onChange={set("project_name")}/>
+        <Input label="Notes" value={f.notes} onChange={set("notes")}/>
+        <Sel label="Order status" value={f.status} onChange={set("status")}><option>Open</option><option>Closed</option><option>Cancelled</option></Sel>
+        <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+          <Btn variant="danger" disabled={busy} onClick={()=>{if(window.confirm(`Delete order ${order.id} and all its lines?`))run(async()=>{await actions.deleteOrder(order.id);onClose();});}}>Delete order</Btn>
+          <Btn disabled={!dirty||busy} onClick={()=>run(()=>actions.updateOrder(order.id,{customer_id:f.customer_id||null,quote_number:f.quote_number||null,po_number:f.po_number||null,project_name:f.project_name||null,notes:f.notes||null,status:f.status}))}>{busy?"Saving…":"Save order"}</Btn>
+        </div>
+      </div>
+      <SectionTitle>{isMaint?"Purchase order lines":"Vessels on this order"}</SectionTitle>
+      {isMaint
+        ? <MaintenanceLines order={order} lines={maintLines.filter(l=>l.order_id===order.id)} parts={parts} maintKits={maintKits} kitLines={kitLines} actions={actions}/>
+        : <VesselLines order={order} lines={orderLines.filter(l=>l.order_id===order.id)} vesselModels={vesselModels} controlLines={controlLines} actions={actions}/>}
+    </div>
+  </Modal>;
+}
+
+function OrdersTab({ orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
+  const [typeFilter,setTypeFilter]=useState("all");
+  const [search,setSearch]=useState("");
+  const [showNew,setShowNew]=useState(false);
+  const [openId,setOpenId]=useState(null);
+  const custName=(id)=>customers.find(c=>c.id===id)?.name||"";
+  const shown=orders.filter(o=>(typeFilter==="all"||(o.order_type||"manufacturing")===typeFilter)
+    && `${o.id} ${o.quote_number||""} ${o.po_number||""} ${o.project_name||""} ${custName(o.customer_id)}`.toLowerCase().includes(search.toLowerCase()));
+  const open=orders.find(o=>o.id===openId);
+  return <div>
+    <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search order, quote, PO, project, customer…" style={{...inputStyle,flex:"1 1 220px"}}/>
+      <select value={typeFilter} onChange={e=>setTypeFilter(e.target.value)} style={inputStyle}>
+        <option value="all">All orders</option><option value="manufacturing">Manufacturing</option><option value="maintenance">Maintenance</option>
+      </select>
+      <Btn onClick={()=>setShowNew(true)}>+ New Order</Btn>
+    </div>
+    <div style={{display:"grid",gap:10}}>
+      {shown.map(o=>{
+        const isMaint=(o.order_type||"manufacturing")==="maintenance";
+        const vl=orderLines.filter(l=>l.order_id===o.id); const ml=maintLines.filter(l=>l.order_id===o.id);
+        const byStatus={}; vl.forEach(l=>{byStatus[l.status]=(byStatus[l.status]||0)+1;});
+        return <div key={o.id} onClick={()=>setOpenId(o.id)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px",cursor:"pointer"}}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+                <span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{o.id}</span>
+                <Badge color={isMaint?"navy":"blue"}>{isMaint?"Maintenance":"Manufacturing"}</Badge>
+                {o.status&&o.status!=="Open"&&<Badge color={o.status==="Closed"?"green":"red"}>{o.status}</Badge>}
+              </div>
+              <div style={{fontSize:13,fontWeight:600,color:C.navy}}>{custName(o.customer_id)||"No customer"}{o.project_name?` · ${o.project_name}`:""}</div>
+              <div style={{fontSize:11,color:C.textLight,marginTop:2,display:"flex",gap:12,flexWrap:"wrap"}}>
+                {o.quote_number&&<span>Quote: <strong>{o.quote_number}</strong></span>}{o.po_number&&<span>PO: <strong>{o.po_number}</strong></span>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"flex-start",justifyContent:"flex-end"}}>
+              {isMaint
+                ? <Badge color="gray">{ml.length} line(s) · {ml.filter(l=>l.status==="Open").length} open</Badge>
+                : Object.entries(byStatus).map(([s,n])=><Badge key={s} color={lineStatusColor(s)}>{n} × {s}</Badge>)}
+              {!isMaint&&vl.length===0&&<Badge color="amber">No vessels yet</Badge>}
+            </div>
+          </div>
+        </div>;
+      })}
+      {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No orders yet. Create one to start planning demand.</div>}
+    </div>
+    {showNew&&<NewOrderModal customers={customers} actions={actions} onClose={()=>setShowNew(false)} onCreated={id=>{setShowNew(false);setOpenId(id);}}/>}
+    {open&&<OrderDetailModal order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
+  </div>;
+}
+
+// ─── Replenishment Tab ───────────────────────────────────────────────────────
+const POLICY_INFO = {
+  order_driven:   ["Order-driven","Order only what confirmed and tentative orders require. Default for vessel parts."],
+  reorder_point:  ["Reorder point","Reorder when stock falls to lead-time demand plus safety stock."],
+  min_max:        ["Min / Max","Order up to Max whenever the position drops below Min."],
+  fixed_interval: ["Fixed interval","Review on a schedule; order up to cover the lead time plus the review period."],
+  do_not_reorder: ["Do not reorder","Never recommend an order (still flags a shortage). For items bought ad hoc."],
+};
+const SERVICE_LEVELS = [["0.9","90%"],["0.95","95% (default)"],["0.975","97.5%"],["0.99","99%"]];
+
+function ItemSettingsModal({ part, procurement, suppliers, actions, onClose }) {
+  const cur = procurement.find(p=>p.part_id===part.id) || {};
+  const [f,setF]=useState({
+    policy:cur.policy||"order_driven", preferred_supplier_id:cur.preferred_supplier_id||"", backup_supplier_id:cur.backup_supplier_id||"",
+    lead_time_days:cur.lead_time_days??"", lead_buffer_days:cur.lead_buffer_days??0, service_level:String(cur.service_level??0.95),
+    moq:cur.moq??1, order_multiple:cur.order_multiple??1, manual_monthly_usage:cur.manual_monthly_usage??0,
+    min_qty:cur.min_qty??"", max_qty:cur.max_qty??"", review_interval_days:cur.review_interval_days??"", notes:cur.notes||"",
+  });
+  const [busy,run]=useRun();
+  const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
+  const linked=part.suppliers||[];
+  const supName=(id)=>suppliers.find(s=>s.id===id)?.name||id;
+  return <Modal title={`Procurement · ${part.id}`} onClose={onClose}>
+    <div style={{display:"grid",gap:14}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.navy}}>{part.description}</div>
+      <div style={{background:C.offWhite,borderRadius:8,padding:10}}>
+        <div style={{fontSize:10,fontWeight:700,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Linked suppliers</div>
+        {linked.length===0&&<div style={{fontSize:12,color:C.red,fontWeight:700}}>⚠ No supplier linked. Link one in Parts Catalog → this part, or nothing can be ordered.</div>}
+        {linked.map(s=><div key={s.supplierId} style={{display:"flex",justifyContent:"space-between",fontSize:12,padding:"3px 0",gap:8,flexWrap:"wrap"}}>
+          <span style={{fontWeight:700,color:C.navy}}>{supName(s.supplierId)}</span>
+          <span style={{fontFamily:"monospace",color:C.textMid}}>{s.mfgPartNo||"—"} · {s.leadDays||0}d lead · {money(s.unitCost)}</span>
+        </div>)}
+      </div>
+      <Sel label="Reorder policy" value={f.policy} onChange={set("policy")}>
+        {Object.entries(POLICY_INFO).map(([k,[n]])=><option key={k} value={k}>{n}</option>)}
+      </Sel>
+      <div style={{fontSize:11,color:C.textMid,marginTop:-6}}>{POLICY_INFO[f.policy][1]}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Sel label="Preferred supplier" value={f.preferred_supplier_id} onChange={set("preferred_supplier_id")}>
+          <option value="">Cheapest linked supplier</option>{linked.map(s=><option key={s.supplierId} value={s.supplierId}>{supName(s.supplierId)}</option>)}
+        </Sel>
+        <Sel label="Backup supplier" value={f.backup_supplier_id} onChange={set("backup_supplier_id")}>
+          <option value="">Next cheapest</option>{linked.map(s=><option key={s.supplierId} value={s.supplierId}>{supName(s.supplierId)}</option>)}
+        </Sel>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Input label="Lead time override (days)" type="number" min="0" value={f.lead_time_days} onChange={set("lead_time_days")} placeholder="Use supplier lead time"/>
+        <Input label="Extra lead-time buffer (days)" type="number" min="0" value={f.lead_buffer_days} onChange={set("lead_buffer_days")}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
+        <Input label="Min order qty (MOQ)" type="number" min="1" value={f.moq} onChange={set("moq")}/>
+        <Input label="Order multiple (pack)" type="number" min="1" value={f.order_multiple} onChange={set("order_multiple")}/>
+        <Sel label="Service level" value={f.service_level} onChange={set("service_level")}>{SERVICE_LEVELS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</Sel>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <Input label={f.policy==="min_max"?"Min qty":"Minimum on hand (safety floor)"} type="number" min="0" value={f.min_qty} onChange={set("min_qty")} placeholder="optional"/>
+        {f.policy==="min_max"&&<Input label="Max qty" type="number" min="0" value={f.max_qty} onChange={set("max_qty")}/>}
+        {["reorder_point","fixed_interval"].includes(f.policy)&&<Input label="Review / cover period (days)" type="number" min="1" value={f.review_interval_days} onChange={set("review_interval_days")} placeholder="30"/>}
+      </div>
+      <Input label="Extra expected usage per month (optional)" type="number" min="0" value={f.manual_monthly_usage} onChange={set("manual_monthly_usage")}/>
+      <div style={{fontSize:11,color:C.textLight,marginTop:-6}}>Leave at 0 to forecast only from confirmed and tentative orders.</div>
+      <Input label="Notes" value={f.notes} onChange={set("notes")}/>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <Btn variant="outline" onClick={onClose}>Cancel</Btn>
+        <Btn disabled={busy} onClick={()=>run(async()=>{await actions.saveProcurement(part.id,f);onClose();})}>{busy?"Saving…":"Save settings"}</Btn>
+      </div>
+    </div>
+  </Modal>;
+}
+
+const dueText=(d)=>d<0?`${Math.abs(d)}d overdue`:d===0?"today":`in ${d}d`;
+const urgencyBadge=(u)=><Badge color={u==="late"?"red":u==="order_soon"?"amber":"gray"}>{u==="late"?"LATE":u==="order_soon"?"ORDER SOON":"PLANNED"}</Badge>;
+const thS={padding:"8px 10px",textAlign:"left",fontSize:10,textTransform:"uppercase",letterSpacing:.5,color:"#8A9BB0",background:C.navy,position:"sticky",top:0,whiteSpace:"nowrap"};
+const tdS={padding:"8px 10px",borderBottom:`1px solid ${C.border}`,fontSize:12,verticalAlign:"top"};
+
+function PoGroupCard({ g, supplier, parts, draftKeys, canCreate, onCreate, busy, tentative }) {
+  const unassigned=g.supplier_id==="UNASSIGNED";
+  const inDraft=g.lines.filter(l=>draftKeys.has(`${g.supplier_id}|${l.part_id}`)).length;
+  const csv=()=>downloadCsv(`${tentative?"tentative-":""}po-${(supplier?.name||g.supplier_id).replace(/\W+/g,"-")}-${localToday()}.csv`,
+    [["Supplier","SKU","Supplier part no","Description","Qty","Unit cost","Extended","Needed by"],
+     ...g.lines.map(l=>[supplier?.name||g.supplier_id,l.part_id,l.mfg_part_no||"",parts.find(p=>p.id===l.part_id)?.description||"",l.qty,l.unit_cost??"",l.unit_cost!=null?(l.qty*l.unit_cost).toFixed(2):"",l.needed_by||""])]);
+  const print=()=>printPurchaseOrder({po:{id:null,status:tentative?"Tentative preview":"Draft (forecast)",notes:`Generated from replenishment forecast ${localToday()}`},supplier,lines:g.lines,parts});
+  return <div style={{background:C.white,border:`1.5px ${tentative?"dashed":"solid"} ${unassigned?C.redBorder:C.border}`,borderRadius:8,padding:14,marginBottom:12}}>
+    <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap",marginBottom:8}}>
+      <div>
+        <div style={{fontWeight:800,fontSize:15,color:unassigned?C.red:C.navy}}>{unassigned?"No supplier linked":(supplier?.name||g.supplier_id)}</div>
+        <div style={{fontSize:11,color:C.textLight}}>Order by <strong style={{color:C.navy}}>{fmtDate(g.order_by)}</strong> · {g.lines.length} line(s)</div>
+      </div>
+      <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:20,fontWeight:700,color:C.navy}}>{money(g.total)}</div><div style={{fontSize:10,color:C.textLight}}>est. total</div></div>
+    </div>
+    {unassigned&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"8px 12px",fontSize:12,color:C.red,marginBottom:8}}>These items have no linked supplier. Link one on the part (Parts Catalog) before ordering.</div>}
+    {inDraft>0&&<div style={{background:C.warnBg,border:`1px solid ${C.warnBdr}`,borderRadius:6,padding:"6px 12px",fontSize:11,color:C.warnText,marginBottom:8}}>⚠ {inDraft} of {g.lines.length} line(s) are already on a draft PO for this supplier. Creating another would duplicate them.</div>}
+    <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse"}}>
+      <thead><tr>{["SKU","Description","Supplier part no.","Qty","Unit","Extended","Need by"].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+      <tbody>{g.lines.map(l=><tr key={l.part_id}>
+        <td style={{...tdS,fontFamily:"monospace",fontWeight:700,color:C.amber}}>{l.part_id}</td>
+        <td style={tdS}>{parts.find(p=>p.id===l.part_id)?.description}</td>
+        <td style={{...tdS,fontFamily:"monospace"}}>{l.mfg_part_no||"—"}</td>
+        <td style={{...tdS,fontFamily:"monospace",fontWeight:700}}>{l.qty}</td>
+        <td style={{...tdS,fontFamily:"monospace"}}>{money(l.unit_cost)}</td>
+        <td style={{...tdS,fontFamily:"monospace"}}>{l.unit_cost!=null?money(l.qty*l.unit_cost):"—"}</td>
+        <td style={tdS}>{fmtDate(l.needed_by)}</td>
+      </tr>)}</tbody>
+    </table></div>
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10,flexWrap:"wrap"}}>
+      <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={csv}>⬇ CSV</Btn>
+      <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={print}>🖨 Print</Btn>
+      {canCreate&&!unassigned&&!tentative&&<Btn disabled={busy} onClick={onCreate}>{busy?"Creating…":"Create draft PO"}</Btn>}
+    </div>
+  </div>;
+}
+
+function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, packingSlipTypes, maintLines, kitLines, procurement, purchaseOrders, poLines, actions }) {
+  const [view,setView]=useState("recs");
+  const [horizon,setHorizon]=useState("180");
+  const [tieBreak,setTieBreak]=useState("maintenance");
+  const [showTentative,setShowTentative]=useState(true);
+  const [filter,setFilter]=useState("all");
+  const [settingsPart,setSettingsPart]=useState(null);
+  const [search,setSearch]=useState("");
+  const [busy,run]=useRun();
+  const [msg,setMsg]=useState("");
+
+  const supplierLinks=useMemo(()=>parts.flatMap(p=>(p.suppliers||[]).map(s=>({part_id:p.id,supplier_id:s.supplierId,mfg_part_no:s.mfgPartNo,lead_days:s.leadDays,unit_cost:s.unitCost}))),[parts]);
+  const liveOrders=useMemo(()=>new Set(orders.filter(o=>!["Cancelled","Closed"].includes(o.status)).map(o=>o.id)),[orders]);
+  const openPoLines=useMemo(()=>{
+    const open=new Map(purchaseOrders.filter(p=>["Sent","Partially Received"].includes(p.status)).map(p=>[p.id,p]));
+    return poLines.filter(l=>open.has(l.po_id)).map(l=>({part_id:l.part_id,qty:l.qty,qty_received:l.qty_received,expected_date:open.get(l.po_id).expected_date||l.needed_by}));
+  },[purchaseOrders,poLines]);
+  const result=useMemo(()=>forecast({
+    parts,procurement,supplierLinks,controlLines,listTypes:packingSlipTypes,openPoLines,kitLines,
+    orderLines:orderLines.filter(l=>liveOrders.has(l.order_id)),
+    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)),
+  },{today:localToday(),horizonDays:+horizon,tieBreak}),[parts,procurement,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
+
+  const draftKeys=useMemo(()=>{
+    const d=new Map(purchaseOrders.filter(p=>p.status==="Draft").map(p=>[p.id,p.supplier_id]));
+    return new Set(poLines.filter(l=>d.has(l.po_id)).map(l=>`${d.get(l.po_id)}|${l.part_id}`));
+  },[purchaseOrders,poLines]);
+
+  const recs=result.recommendations;
+  const firmTotal=result.purchaseOrders.reduce((s,g)=>s+g.total,0);
+  const tentTotal=result.tentativePurchaseOrders.reduce((s,g)=>s+g.total,0);
+  const count=(u)=>recs.filter(r=>r.urgency===u&&(r.firm_order_qty>0||r.flags.includes("expedite_open_po"))).length;
+  const attention=recs.filter(r=>r.flags.some(f=>flagColor(f)==="red")).length;
+  const supplierOf=(id)=>suppliers.find(s=>s.id===id);
+  const hasDemandData=orderLines.length>0||maintLines.length>0||procurement.length>0;
+
+  const shownRecs=recs.filter(r=>(showTentative||r.firm_order_qty>0||r.flags.includes("expedite_open_po")||r.flags.includes("shortage_but_do_not_reorder"))
+    && (filter==="all"||r.urgency===filter));
+
+  const createPo=(g)=>run(async()=>{
+    const id=await actions.createPurchaseOrder({supplier_id:g.supplier_id,notes:`Generated from replenishment forecast ${localToday()}`,lines:g.lines});
+    setMsg(`Created ${id} as a Draft. Review and send it on the Purchase Orders tab.`);
+  });
+
+  const statCard=(label,value,color)=><div style={{flex:"1 1 130px",background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"12px 14px"}}>
+    <div style={{fontFamily:"monospace",fontSize:24,fontWeight:700,color:color||C.navy}}>{value}</div>
+    <div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.5}}>{label}</div></div>;
+
+  const itemRows=useMemo(()=>{
+    const procSet=new Set(procurement.map(p=>p.part_id)); const recSet=new Set(recs.map(r=>r.part_id));
+    const q=search.toLowerCase();
+    return parts.filter(p=>!q||p.id.toLowerCase().includes(q)||(p.description||"").toLowerCase().includes(q))
+      .sort((a,b)=>((procSet.has(b.id)||recSet.has(b.id))-(procSet.has(a.id)||recSet.has(a.id)))||a.id.localeCompare(b.id));
+  },[parts,procurement,recs,search]);
+
+  return <div>
+    <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
+      {statCard("Late",count("late"),count("late")?C.red:C.navy)}
+      {statCard("Order soon",count("order_soon"),count("order_soon")?C.amber:C.navy)}
+      {statCard("Planned",count("planned"))}
+      {statCard("Firm to order",money(firmTotal),C.greenText)}
+      {statCard("Tentative",money(tentTotal),C.textMid)}
+      {statCard("Need attention",attention,attention?C.red:C.navy)}
+    </div>
+    <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:14,background:C.offWhite,borderRadius:8,padding:"10px 14px"}}>
+      <label style={{fontSize:12,color:C.textMid}}>Look ahead&nbsp;
+        <select value={horizon} onChange={e=>setHorizon(e.target.value)} style={{...inputStyle,padding:"4px 8px",fontSize:12}}>{["60","90","180","365"].map(d=><option key={d} value={d}>{d} days</option>)}</select></label>
+      <label style={{fontSize:12,color:C.textMid}}>Same-day tie goes to&nbsp;
+        <select value={tieBreak} onChange={e=>setTieBreak(e.target.value)} style={{...inputStyle,padding:"4px 8px",fontSize:12}}><option value="maintenance">Maintenance POs</option><option value="manufacturing">Vessel builds</option></select></label>
+      <label style={{fontSize:12,color:C.textMid,display:"flex",alignItems:"center",gap:6}}><input type="checkbox" checked={showTentative} onChange={e=>setShowTentative(e.target.checked)}/>Include tentative (lists not final)</label>
+      <span style={{fontSize:11,color:C.textLight,marginLeft:"auto"}}>As of {fmtDate(localToday())}</span>
+    </div>
+    {msg&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.greenText,marginBottom:12,display:"flex",justifyContent:"space-between",gap:8}}>
+      <span>✅ {msg}</span><button onClick={()=>setMsg("")} style={{background:"none",border:"none",cursor:"pointer",color:C.greenText}}>✕</button></div>}
+
+    <SubTabs value={view} onChange={setView} items={[["recs",`📈 Recommendations (${shownRecs.length})`],["pos","🧾 Draft Purchase Orders"],["items","⚙ Item Settings"]]}/>
+
+    {view==="recs"&&<div>
+      {!hasDemandData&&<div style={{background:C.warnBg,border:`1px solid ${C.warnBdr}`,borderRadius:8,padding:16,marginBottom:14,fontSize:13,color:C.warnText}}>
+        <strong>Nothing to forecast yet.</strong> 1) Define vessel models and their Main/Loose/Spare lists on <em>Control Lists</em>. 2) Enter vessel and maintenance orders on <em>Orders</em> with a planned paint-start date. 3) Link suppliers (with lead time and cost) on each part.</div>}
+      <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+        {[["all","All"],["late","Late"],["order_soon","Order soon"],["planned","Planned"]].map(([k,l])=><button key={k} onClick={()=>setFilter(k)} style={{background:filter===k?C.amber:C.white,color:C.navy,border:`1.5px solid ${filter===k?C.amber:C.border}`,borderRadius:16,padding:"4px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{l}</button>)}
+      </div>
+      <div style={{overflowX:"auto",border:`1.5px solid ${C.border}`,borderRadius:8,background:C.white}}>
+        <table style={{width:"100%",borderCollapse:"collapse",minWidth:900}}>
+          <thead><tr>{["Status","Part","Stock","Demand","Order qty","Order by","Need by","Supplier","Cost",""].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+          <tbody>
+            {shownRecs.map(r=>{
+              const sup=supplierOf(r.supplier_id); const bk=supplierOf(r.backup_supplier_id);
+              const tentOnly=r.firm_order_qty===0&&r.tentative_order_qty>0;
+              const date=r.firm_order_by||r.tentative_order_by||r.order_by;
+              return <tr key={r.part_id} style={{background:r.urgency==="late"?"#FFF5F6":C.white}}>
+                <td style={tdS}>{urgencyBadge(r.urgency)}{tentOnly&&<div style={{marginTop:4}}><Badge color="amber">Tentative</Badge></div>}</td>
+                <td style={tdS}>
+                  <div style={{fontFamily:"monospace",fontWeight:700,color:C.amber}}>{r.part_id}</div>
+                  <div style={{color:C.textMid,maxWidth:240}}>{r.description}</div>
+                  <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
+                    {r.flags.map(f=><Badge key={f} color={flagColor(f)}>{f==="po_arrives_late"?`PO ${r.po_late_days}d late`:(FLAG_LABELS[f]||f)}</Badge>)}
+                    {draftKeys.has(`${r.supplier_id}|${r.part_id}`)&&<Badge color="blue">In draft PO</Badge>}
+                  </div>
+                </td>
+                <td style={{...tdS,fontFamily:"monospace",whiteSpace:"nowrap"}}>{r.on_hand} on hand{r.allocated_qty>0&&<div style={{color:C.textLight}}>{r.allocated_qty} reserved</div>}{r.on_order>0&&<div style={{color:C.textLight}}>{r.on_order} on order</div>}</td>
+                <td style={{...tdS,whiteSpace:"nowrap"}}>{r.demand_by_source.manufacturing>0&&<div>🏭 {r.demand_by_source.manufacturing} build</div>}{r.demand_by_source.maintenance>0&&<div>🔧 {r.demand_by_source.maintenance} maint.</div>}
+                  <div style={{fontSize:10,color:C.textLight}}>{r.demand_by_firmness.firm} firm · {r.demand_by_firmness.tentative} tent.</div></td>
+                <td style={{...tdS,fontFamily:"monospace",whiteSpace:"nowrap"}}>
+                  <div style={{fontWeight:700,fontSize:15,color:C.navy}}>{r.firm_order_qty}</div>
+                  {r.tentative_order_qty>0&&<div style={{color:C.textLight}}>+{r.tentative_order_qty} tentative</div>}
+                  {r.order_qty===0&&<div style={{color:C.red,fontSize:10}}>no new order</div>}
+                </td>
+                <td style={{...tdS,whiteSpace:"nowrap"}}><div style={{fontWeight:700,color:r.urgency==="late"?C.red:C.navy}}>{fmtDate(date)}</div><div style={{fontSize:10,color:C.textLight}}>{dueText(diffDaysLocal(date))}</div></td>
+                <td style={{...tdS,whiteSpace:"nowrap"}}>{fmtDate(r.need_by)}</td>
+                <td style={tdS}>{sup?<div style={{fontWeight:600,color:C.navy}}>{sup.name}</div>:<span style={{color:C.red}}>—</span>}{bk&&<div style={{fontSize:10,color:C.textLight}}>backup: {bk.name}</div>}<div style={{fontSize:10,color:C.textLight}}>{r.lead_days}d lead</div></td>
+                <td style={{...tdS,fontFamily:"monospace",whiteSpace:"nowrap"}}>{money(r.firm_ext_cost)}{r.tentative_ext_cost>0&&<div style={{color:C.textLight}}>+{money(r.tentative_ext_cost)}</div>}</td>
+                <td style={tdS}><button title="Procurement settings" onClick={()=>setSettingsPart(parts.find(p=>p.id===r.part_id))} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:5,cursor:"pointer",padding:"4px 8px"}}>⚙</button></td>
+              </tr>;
+            })}
+            {shownRecs.length===0&&<tr><td colSpan={10} style={{...tdS,textAlign:"center",padding:36,color:C.textLight}}>{hasDemandData?"Nothing needs ordering within the look-ahead window. 🎉":"No demand to forecast yet."}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div style={{fontSize:11,color:C.textLight,marginTop:8}}>Order qty = firm demand (lists final or later, and maintenance POs). Tentative adds demand from signed POs whose lists are not final. Stock reserved for released/staged vessels is held back.</div>
+    </div>}
+
+    {view==="pos"&&<div>
+      <SectionTitle>Ready to order — firm demand</SectionTitle>
+      {result.purchaseOrders.length===0&&<div style={{textAlign:"center",padding:30,color:C.textLight}}>No firm orders are needed right now.</div>}
+      {result.purchaseOrders.map(g=><PoGroupCard key={g.supplier_id} g={g} supplier={supplierOf(g.supplier_id)} parts={parts} draftKeys={draftKeys} canCreate busy={busy} onCreate={()=>createPo(g)}/>)}
+      {showTentative&&<>
+        <div style={{marginTop:22}}><SectionTitle>Preview — tentative demand (lists not final)</SectionTitle></div>
+        {result.tentativePurchaseOrders.length===0&&<div style={{textAlign:"center",padding:30,color:C.textLight}}>No tentative orders.</div>}
+        {result.tentativePurchaseOrders.map(g=><PoGroupCard key={"t"+g.supplier_id} g={g} supplier={supplierOf(g.supplier_id)} parts={parts} draftKeys={draftKeys} tentative/>)}
+      </>}
+    </div>}
+
+    {view==="items"&&<div>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search SKU or description…" style={{...inputStyle,width:"100%",marginBottom:10}}/>
+      <div style={{overflowX:"auto",border:`1.5px solid ${C.border}`,borderRadius:8,background:C.white}}>
+        <table style={{width:"100%",borderCollapse:"collapse",minWidth:760}}>
+          <thead><tr>{["Part","Policy","Preferred supplier","Lead","MOQ / pack","Service","Usage / mo",""].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+          <tbody>{itemRows.slice(0,60).map(p=>{
+            const pr=procurement.find(x=>x.part_id===p.id);
+            return <tr key={p.id}>
+              <td style={tdS}><div style={{fontFamily:"monospace",fontWeight:700,color:C.amber}}>{p.id}</div><div style={{color:C.textMid,maxWidth:260}}>{p.description}</div>{(p.suppliers||[]).length===0&&<Badge color="red">No supplier</Badge>}</td>
+              <td style={tdS}>{POLICY_INFO[pr?.policy||"order_driven"][0]}{!pr&&<div style={{fontSize:10,color:C.textLight}}>default</div>}</td>
+              <td style={tdS}>{pr?.preferred_supplier_id?suppliers.find(s=>s.id===pr.preferred_supplier_id)?.name:<span style={{color:C.textLight}}>cheapest</span>}</td>
+              <td style={{...tdS,fontFamily:"monospace"}}>{pr?.lead_time_days??p.suppliers?.[0]?.leadDays??"—"}d</td>
+              <td style={{...tdS,fontFamily:"monospace"}}>{pr?.moq??1} / {pr?.order_multiple??1}</td>
+              <td style={{...tdS,fontFamily:"monospace"}}>{Math.round((pr?.service_level??0.95)*1000)/10}%</td>
+              <td style={{...tdS,fontFamily:"monospace"}}>{pr?.manual_monthly_usage??0}</td>
+              <td style={tdS}><Btn variant="outline" style={{padding:"4px 10px",fontSize:11}} onClick={()=>setSettingsPart(p)}>Edit</Btn></td>
+            </tr>;})}
+          </tbody>
+        </table>
+      </div>
+      {itemRows.length>60&&<div style={{fontSize:11,color:C.textLight,marginTop:8}}>Showing the first 60 of {itemRows.length}. Items with settings or demand are listed first; search to find others.</div>}
+    </div>}
+
+    {settingsPart&&<ItemSettingsModal part={settingsPart} procurement={procurement} suppliers={suppliers} actions={actions} onClose={()=>setSettingsPart(null)}/>}
+  </div>;
+}
+const diffDaysLocal=(d)=>Math.round((new Date(d+"T00:00:00")-new Date(localToday()+"T00:00:00"))/86400000);
+
+// ─── Purchase Orders Tab ─────────────────────────────────────────────────────
+function PoDetailModal({ po, lines, supplier, parts, actions, onClose }) {
+  const [f,setF]=useState({order_date:po.order_date||"",expected_date:po.expected_date||"",notes:po.notes||""});
+  const [recv,setRecv]=useState({});
+  const [busy,run]=useRun();
+  const total=lines.reduce((s,l)=>s+(l.unit_cost!=null?l.qty*l.unit_cost:0),0);
+  const canReceive=["Sent","Partially Received"].includes(po.status);
+  const out=(l)=>Math.max((+l.qty)-(+l.qty_received||0),0);
+  const dirty=f.order_date!==(po.order_date||"")||f.expected_date!==(po.expected_date||"")||f.notes!==(po.notes||"");
+  const fields=()=>({order_date:f.order_date||null,expected_date:f.expected_date||null,notes:f.notes||null});
+  const csv=()=>downloadCsv(`${po.id}.csv`,[["PO","Supplier","SKU","Supplier part no","Description","Ordered","Received","Unit cost","Needed by"],
+    ...lines.map(l=>[po.id,supplier?.name||"",l.part_id,l.mfg_part_no||"",parts.find(p=>p.id===l.part_id)?.description||"",l.qty,l.qty_received,l.unit_cost??"",l.needed_by||""])]);
+  return <Modal title={po.id} onClose={onClose}>
+    <div style={{display:"grid",gap:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+        <div><div style={{fontWeight:800,fontSize:15,color:C.navy}}>{supplier?.name||po.supplier_id||"No supplier"}</div>
+          <div style={{fontSize:11,color:C.textLight}}>{supplier?.contact} {supplier?.phone&&`· ${supplier.phone}`}</div></div>
+        <div style={{textAlign:"right"}}><Badge color={poStatusColor(po.status)}>{po.status}</Badge><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy,marginTop:4}}>{money(total)}</div></div>
+      </div>
+      <div style={{background:C.offWhite,borderRadius:8,padding:12,display:"grid",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <Field label="Order date"><input type="date" value={f.order_date} onChange={e=>setF(p=>({...p,order_date:e.target.value}))} style={inputStyle}/></Field>
+          <Field label="Expected delivery"><input type="date" value={f.expected_date} onChange={e=>setF(p=>({...p,expected_date:e.target.value}))} style={inputStyle}/></Field>
+        </div>
+        <Input label="Notes" value={f.notes} onChange={e=>setF(p=>({...p,notes:e.target.value}))}/>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
+          {po.status==="Draft"&&<Btn variant="danger" disabled={busy} onClick={()=>{if(window.confirm(`Delete draft ${po.id}?`))run(async()=>{await actions.deletePurchaseOrder(po.id);onClose();});}}>Delete draft</Btn>}
+          {["Sent","Partially Received"].includes(po.status)&&<Btn variant="danger" disabled={busy} onClick={()=>{if(window.confirm(`Cancel ${po.id}? Quantities already received stay in stock.`))run(()=>actions.updatePurchaseOrder(po.id,{status:"Cancelled"}));}}>Cancel PO</Btn>}
+          <Btn variant="outline" disabled={!dirty||busy} onClick={()=>run(()=>actions.updatePurchaseOrder(po.id,fields()))}>Save details</Btn>
+          {po.status==="Draft"&&<Btn disabled={!f.expected_date||busy} onClick={()=>run(()=>actions.updatePurchaseOrder(po.id,{...fields(),order_date:f.order_date||localToday(),status:"Sent"}))}>Mark as sent</Btn>}
+        </div>
+        {po.status==="Draft"&&!f.expected_date&&<div style={{fontSize:11,color:C.warnText}}>Set the expected delivery date to mark this PO as sent. The forecast uses it to net open orders against demand.</div>}
+      </div>
+      <SectionTitle>Lines</SectionTitle>
+      <div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",minWidth:520}}>
+        <thead><tr>{["SKU","Ordered","Received","Unit","Receive"].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+        <tbody>{lines.map(l=>{
+          const o=out(l);
+          return <tr key={l.id}>
+            <td style={tdS}><div style={{fontFamily:"monospace",fontWeight:700,color:C.amber}}>{l.part_id}</div><div style={{color:C.textMid}}>{parts.find(p=>p.id===l.part_id)?.description}</div>{l.mfg_part_no&&<div style={{fontSize:10,color:C.textLight,fontFamily:"monospace"}}>{l.mfg_part_no}</div>}</td>
+            <td style={{...tdS,fontFamily:"monospace",fontWeight:700}}>{l.qty}</td>
+            <td style={{...tdS,fontFamily:"monospace",color:o===0?C.greenText:C.navy}}>{l.qty_received}{o>0&&<span style={{color:C.textLight}}> ({o} due)</span>}</td>
+            <td style={{...tdS,fontFamily:"monospace"}}>{money(l.unit_cost)}</td>
+            <td style={tdS}>{canReceive&&o>0
+              ? <div style={{display:"flex",gap:6}}>
+                  <input type="number" min="1" max={o} value={recv[l.id]??o} onChange={e=>setRecv(r=>({...r,[l.id]:e.target.value}))} style={{...inputStyle,width:64,padding:"4px 6px",fontFamily:"monospace"}}/>
+                  <Btn variant="outline" style={{padding:"4px 10px",fontSize:11}} disabled={busy} onClick={()=>run(()=>actions.receivePoLine(po,l,recv[l.id]??o))}>Receive</Btn>
+                </div>
+              : <span style={{fontSize:11,color:C.textLight}}>{o===0?"✓ complete":"—"}</span>}</td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+      <div style={{display:"flex",gap:8,justifyContent:"space-between",flexWrap:"wrap"}}>
+        <div style={{display:"flex",gap:8}}>
+          <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={csv}>⬇ CSV</Btn>
+          <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={()=>printPurchaseOrder({po,supplier,lines,parts})}>🖨 Print</Btn>
+        </div>
+        {canReceive&&lines.some(l=>out(l)>0)&&<Btn disabled={busy} onClick={()=>{if(window.confirm("Receive every outstanding line in full into stock?"))run(async()=>{for(const l of lines){const o=out(l);if(o>0)await actions.receivePoLine(po,l,o);}});}}>📥 Receive all outstanding</Btn>}
+      </div>
+      {canReceive&&<div style={{fontSize:11,color:C.textLight}}>Receiving adds to on-hand stock and to this supplier's stock, and is recorded in the Audit Log.</div>}
+    </div>
+  </Modal>;
+}
+
+function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions }) {
+  const [status,setStatus]=useState("open");
+  const [search,setSearch]=useState("");
+  const [openId,setOpenId]=useState(null);
+  const supplierOf=(id)=>suppliers.find(s=>s.id===id);
+  const totalOf=(id)=>poLines.filter(l=>l.po_id===id).reduce((s,l)=>s+(l.unit_cost!=null?l.qty*l.unit_cost:0),0);
+  const shown=purchaseOrders.filter(p=>(status==="all"||(status==="open"?["Draft","Sent","Partially Received"].includes(p.status):p.status===status))
+    && `${p.id} ${supplierOf(p.supplier_id)?.name||""}`.toLowerCase().includes(search.toLowerCase()));
+  const open=purchaseOrders.find(p=>p.id===openId);
+  return <div>
+    <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search PO number or supplier…" style={{...inputStyle,flex:"1 1 220px"}}/>
+      <select value={status} onChange={e=>setStatus(e.target.value)} style={inputStyle}>
+        <option value="open">Open (draft / sent / partial)</option><option value="all">All</option>{PO_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+      </select>
+    </div>
+    <div style={{display:"grid",gap:10}}>
+      {shown.map(p=>{
+        const ls=poLines.filter(l=>l.po_id===p.id); const recd=ls.reduce((s,l)=>s+(+l.qty_received||0),0); const ord=ls.reduce((s,l)=>s+(+l.qty),0);
+        return <div key={p.id} onClick={()=>setOpenId(p.id)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px",cursor:"pointer"}}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
+            <div>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{p.id}</span><Badge color={poStatusColor(p.status)}>{p.status}</Badge></div>
+              <div style={{fontSize:13,fontWeight:600,color:C.navy}}>{supplierOf(p.supplier_id)?.name||p.supplier_id||"No supplier"}</div>
+              <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{ls.length} line(s) · ordered {fmtDate(p.order_date)} · expected {fmtDate(p.expected_date)}</div>
+            </div>
+            <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy}}>{money(totalOf(p.id))}</div><div style={{fontSize:11,color:C.textLight}}>{recd}/{ord} received</div></div>
+          </div>
+        </div>;
+      })}
+      {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No purchase orders. Create a draft from the Replenishment tab.</div>}
+    </div>
+    {open&&<PoDetailModal po={open} lines={poLines.filter(l=>l.po_id===open.id)} supplier={supplierOf(open.supplier_id)} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
+  </div>;
+}
+
+// ═══ REPLENISHMENT UI END ═════════════════════════════════════════════════════
+
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,loading,error,actions}=useData();
+  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+    vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
+    loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
@@ -1808,6 +2810,10 @@ function MainApp({ user, onSignOut }) {
     {id:"customers",label:"Customers",icon:"🏢"},
     {id:"inventory",label:"Inventory",icon:"📦"},
     {id:"lp",label:"License Plates",icon:"🏷️"},
+    {id:"orders",label:"Orders",icon:"📑"},
+    {id:"controllists",label:"Control Lists",icon:"🧾"},
+    {id:"replenish",label:"Replenishment",icon:"📈"},
+    {id:"pos",label:"Purchase Orders",icon:"🛒"},
     {id:"audit",label:"Audit Log",icon:"📋"},
   ];
   return (
@@ -1856,6 +2862,10 @@ function MainApp({ user, onSignOut }) {
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions}/>
+          :tab==="orders"?<OrdersTab orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
+          :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
+          :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
+          :tab==="pos"?<PurchaseOrdersTab purchaseOrders={purchaseOrders} poLines={poLines} suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="audit"?<AuditLogTab/>
           :null}
       </div>
@@ -1885,10 +2895,23 @@ function AuditLogTab() {
     stock_adjust:"Stock Adjust",part_add:"Part Added",supplier_add:"Supplier Added",
     supplier_link:"Supplier Linked",supplier_unlink:"Supplier Unlinked",
     lp_create:"LP Created",lp_status:"LP Status",barcode_add:"Barcode Added",barcode_remove:"Barcode Removed",
+    order_create:"Order Created",order_edit:"Order Edited",order_delete:"Order Deleted",
+    order_line_add:"Vessel Added",order_line_edit:"Vessel Line Edited",order_line_delete:"Vessel Line Removed",
+    maint_line_add:"Maint. Line Added",maint_line_edit:"Maint. Line Edited",maint_line_delete:"Maint. Line Removed",
+    vessel_model_add:"Vessel Model Added",vessel_model_edit:"Vessel Model Edited",vessel_model_delete:"Vessel Model Deleted",
+    control_line_save:"Control List Line",control_line_delete:"Control List Line Removed",
+    kit_add:"Kit Added",kit_edit:"Kit Edited",kit_delete:"Kit Deleted",kit_line_save:"Kit Line",kit_line_delete:"Kit Line Removed",
+    list_type_edit:"Pick Time Changed",procurement_save:"Procurement Settings",
+    po_create:"PO Created",po_status:"PO Status",po_edit:"PO Edited",po_delete:"PO Deleted",
   };
   const actionColors={
     stock_adjust:"green",part_add:"blue",supplier_add:"blue",supplier_link:"navy",
     supplier_unlink:"red",lp_create:"amber",lp_status:"amber",barcode_add:"navy",barcode_remove:"red",
+    order_create:"blue",order_edit:"blue",order_delete:"red",order_line_add:"blue",order_line_edit:"blue",order_line_delete:"red",
+    maint_line_add:"navy",maint_line_edit:"navy",maint_line_delete:"red",
+    vessel_model_add:"blue",vessel_model_edit:"blue",vessel_model_delete:"red",control_line_save:"navy",control_line_delete:"red",
+    kit_add:"blue",kit_edit:"blue",kit_delete:"red",kit_line_save:"navy",kit_line_delete:"red",
+    list_type_edit:"amber",procurement_save:"amber",po_create:"green",po_status:"amber",po_edit:"navy",po_delete:"red",
   };
 
   const users=[...new Set(logs.map(l=>l.user_email))].filter(Boolean);
