@@ -1,6 +1,7 @@
 // ChlorTainer Inventory System v2.1
 import { useState, useEffect, useRef, useMemo, useId } from "react";
 import { forecast, FIRM_STATUSES } from "./replenishment.js";
+import BinLabelsTab from "./BinLabels.jsx";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -2810,6 +2811,7 @@ function MainApp({ user, onSignOut }) {
     {id:"customers",label:"Customers",icon:"🏢"},
     {id:"inventory",label:"Inventory",icon:"📦"},
     {id:"lp",label:"License Plates",icon:"🏷️"},
+    {id:"binlabels",label:"Bin Labels",icon:"🖨️"},
     {id:"orders",label:"Orders",icon:"📑"},
     {id:"controllists",label:"Control Lists",icon:"🧾"},
     {id:"replenish",label:"Replenishment",icon:"📈"},
@@ -2862,6 +2864,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions}/>
+          :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
