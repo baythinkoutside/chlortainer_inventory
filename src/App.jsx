@@ -7,8 +7,15 @@ import BinLabelsTab from "./BinLabels.jsx";
 const STORAGE_KEY = "chlortainer_sb_config";
 let _sb = null;
 
+// Built-in connection: the project URL and anon (public) key are safe to ship in the
+// client (access is controlled by Supabase RLS/auth), so new users skip the setup screen.
+// Netlify env vars VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY override these defaults.
+const DEFAULT_CONFIG = {
+  url: import.meta.env.VITE_SUPABASE_URL || "https://mwvxbxbxwwmekdfwmfao.supabase.co",
+  key: import.meta.env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im13dnhieGJ4d3dtZWtkZndtZmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3NDUxNzMsImV4cCI6MjA5ODMyMTE3M30.JhGyJrpwZyxIU7otUILVg6a_a7B85mLV0VAsVU60QdI",
+};
 function loadConfig() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || null; } catch { return null; }
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || DEFAULT_CONFIG; } catch { return DEFAULT_CONFIG; }
 }
 function saveConfig(cfg) { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); }
 function clearConfig() { localStorage.removeItem(STORAGE_KEY); _sb = null; }
