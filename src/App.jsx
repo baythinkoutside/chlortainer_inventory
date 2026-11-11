@@ -85,10 +85,10 @@ function Badge({ children, color="blue" }) {
   return <span style={{background:s.bg,color:s.text,border:`1px solid ${s.bd}`,borderRadius:3,padding:"2px 8px",fontSize:11,fontWeight:700,letterSpacing:.3}}>{children}</span>;
 }
 
-const inputStyle={border:`1.5px solid ${C.border}`,borderRadius:5,padding:"9px 12px",fontSize:14,fontFamily:"sans-serif",color:C.textDark,outline:"none",background:C.white};
+const inputStyle={boxSizing:"border-box",maxWidth:"100%",minWidth:0,border:`1.5px solid ${C.border}`,borderRadius:5,padding:"9px 12px",fontSize:14,fontFamily:"sans-serif",color:C.textDark,outline:"none",background:C.white};
 
 function Field({label,children}){
-  return <div style={{display:"flex",flexDirection:"column",gap:5}}>
+  return <div style={{display:"flex",flexDirection:"column",gap:5,minWidth:0}}>
     <label style={{fontSize:11,fontWeight:700,color:C.textMid,textTransform:"uppercase",letterSpacing:.8}}>{label}</label>
     {children}
   </div>;
@@ -98,7 +98,7 @@ function Input({label,...props}){
   return label?<Field label={label}>{el}</Field>:el;
 }
 function Sel({label,children,...props}){
-  const el=<select {...props} style={{...inputStyle,background:C.white}}>{children}</select>;
+  const el=<select {...props} style={{...inputStyle,background:C.white,width:"100%"}}>{children}</select>;
   return label?<Field label={label}>{el}</Field>:el;
 }
 function Btn({children,variant="primary",onClick,style={},disabled=false}){
@@ -116,7 +116,7 @@ function SectionTitle({children}){
 }
 function Modal({title,onClose,children}){
   return <div style={{position:"fixed",inset:0,background:"rgba(28,43,58,0.72)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-    <div style={{background:C.white,borderRadius:8,width:"100%",maxWidth:580,maxHeight:"92vh",overflowY:"auto",boxShadow:"0 24px 64px rgba(0,0,0,.35)"}}>
+    <div style={{background:C.white,borderRadius:8,width:"100%",maxWidth:620,maxHeight:"92vh",overflowY:"auto",overflowX:"hidden",boxShadow:"0 24px 64px rgba(0,0,0,.35)"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`3px solid ${C.amber}`,background:C.navy}}>
         <h3 style={{margin:0,fontSize:16,fontWeight:800,color:C.white,letterSpacing:.3}}>{title}</h3>
         <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:24,color:"#8A9BB0",lineHeight:1,padding:0}}>×</button>
@@ -850,7 +850,7 @@ function LookupResult({ result, parts, suppliers, onClear }) {
       </div>
       <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:16}}>
         <div style={{fontWeight:800,fontSize:16,color:C.navy,marginBottom:8}}>{live.description}</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
           {[["Category",<Badge color="navy">{live.category}</Badge>],
             ["Location",<code style={{fontSize:13}}>{live.location}</code>],
             ["On Hand",<span style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</span>],
@@ -891,7 +891,7 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
       </div>
       {mfgMatch&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:8,padding:12}}>
         <div style={{fontSize:11,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Scanned via Product Barcode</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
           <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>UPC / Barcode</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{mfgMatch.barcode}</div></div>
           {sup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Supplier</div><div style={{fontSize:13,fontWeight:700,color:C.navy}}>{sup.name}</div></div>}
           {partSup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Unit Cost</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.greenText}}>${partSup.unitCost?.toFixed(2)}</div></div>}
@@ -1142,11 +1142,11 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
     {showAdd&&<Modal title="Add New Part" onClose={()=>setShowAdd(false)}>
       <div style={{display:"grid",gap:14}}>
         <Input label="Description" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="e.g. HDPE Containment Body"/>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
           <Sel label="Category" value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>{["Containment","Seals & Gaskets","Valves","Instrumentation","Filtration","Hardware","Other"].map(c=><option key={c}>{c}</option>)}</Sel>
           <Sel label="UOM" value={form.uom} onChange={e=>setForm(f=>({...f,uom:e.target.value}))}>{["EA","LB","FT","M","L","KG","PKG"].map(u=><option key={u}>{u}</option>)}</Sel>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
           <Input label="Stock Qty" type="number" value={form.stock} onChange={e=>setForm(f=>({...f,stock:e.target.value}))}/>
           <Input label="Min Stock" type="number" value={form.minStock} onChange={e=>setForm(f=>({...f,minStock:e.target.value}))}/>
         </div>
@@ -1257,7 +1257,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
         </div>
         <BarcodeDisplay code={live.id} size="lg"/>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         {[["Description",live.description],["Category",<Badge color="navy">{live.category}</Badge>],
           ["Location",<span style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location||"—"}</span>],["UOM",live.uom]]
           .map(([l,v])=><div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>{l}</div><div style={{fontSize:14,fontWeight:600,color:C.textDark}}>{v}</div></div>)}
@@ -1338,7 +1338,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
           <div style={{display:"grid",gap:8}}>
             <Sel value={addSupForm.supplierId} onChange={e=>setAddSupForm(f=>({...f,supplierId:e.target.value}))}><option value="">Select supplier…</option>{avail.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</Sel>
             <Input placeholder="Mfg Part No." value={addSupForm.mfgPartNo} onChange={e=>setAddSupForm(f=>({...f,mfgPartNo:e.target.value}))}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
               <Input placeholder="Lead days" type="number" value={addSupForm.leadDays} onChange={e=>setAddSupForm(f=>({...f,leadDays:e.target.value}))}/>
               <Input placeholder="Unit cost $" type="number" value={addSupForm.unitCost} onChange={e=>setAddSupForm(f=>({...f,unitCost:e.target.value}))}/>
             </div>
@@ -1656,7 +1656,7 @@ function CustomerModal({ title, initialForm, customerId, actions, onClose }) {
   return <Modal title={title} onClose={onClose}>
     <div style={{display:"grid",gap:14}}>
       <Input label="Company Name *" value={form.name} onChange={f("name")} placeholder="e.g. Murphy Builders"/>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Input label="Contact Name" value={form.contact} onChange={f("contact")} placeholder="Full name"/>
         <Input label="Phone" value={form.phone} onChange={f("phone")} placeholder="(555) 000-0000"/>
       </div>
@@ -1813,7 +1813,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
 
   return <Modal title="Create License Plate" onClose={onClose}>
     <div style={{display:"grid",gap:14}}>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Sel label="Type" value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Outbound</option><option>Inbound</option><option>Transfer</option></Sel>
         <Sel label="Status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}><option>Pending</option><option>Shipped</option><option>Received</option></Sel>
       </div>
@@ -1827,7 +1827,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
         </select>
       </Field>
       <Input label="Destination / Ship To" value={form.destination} onChange={e=>setForm(f=>({...f,destination:e.target.value}))} placeholder="Customer or location name"/>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Input label="Quote Number" value={form.quote_number} onChange={e=>setForm(f=>({...f,quote_number:e.target.value}))} placeholder="e.g. 4113"/>
         <Input label="P.O. Number" value={form.po_number} onChange={e=>setForm(f=>({...f,po_number:e.target.value}))} placeholder="e.g. 26-200-02"/>
       </div>
@@ -1850,13 +1850,13 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
       <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
         <SectionTitle>Line Items</SectionTitle>
         {items.map((it,i)=>{const p=parts.find(x=>x.id===it.partId);return(
-          <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 12px",background:C.offWhite,borderRadius:6,marginBottom:6}}>
-            <div><span style={{fontFamily:"monospace",fontSize:12,color:C.amber}}>{it.partId}</span><span style={{fontSize:12,color:C.textMid,marginLeft:8}}>{p?.description}</span></div>
-            <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>×{it.qty}</span><Btn variant="ghost" style={{padding:"2px 6px",fontSize:12}} onClick={()=>setItems(p=>p.filter((_,j)=>j!==i))}>✕</Btn></div>
+          <div key={i} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,padding:"8px 12px",background:C.offWhite,borderRadius:6,marginBottom:6}}>
+            <div style={{minWidth:0,overflowWrap:"anywhere"}}><span style={{fontFamily:"monospace",fontSize:12,color:C.amber}}>{it.partId}</span><span style={{fontSize:12,color:C.textMid,marginLeft:8}}>{p?.description}</span></div>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}><span style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>×{it.qty}</span><Btn variant="ghost" style={{padding:"2px 6px",fontSize:12}} onClick={()=>setItems(p=>p.filter((_,j)=>j!==i))}>✕</Btn></div>
           </div>
         );})}
-        {available.length>0&&<div style={{display:"flex",gap:8,marginTop:8,alignItems:"flex-end"}}>
-          <div style={{flex:1}}><Sel value={pickPart} onChange={e=>setPickPart(e.target.value)}><option value="">Add SKU…</option>{available.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}</Sel></div>
+        {available.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:8,alignItems:"flex-end"}}>
+          <div style={{flex:"1 1 100%",minWidth:0}}><Sel value={pickPart} onChange={e=>setPickPart(e.target.value)}><option value="">Add SKU…</option>{available.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}</Sel></div>
           <input type="number" min={1} value={pickQty} onChange={e=>setPickQty(e.target.value)} style={{...inputStyle,width:64,fontFamily:"monospace"}}/>
           <Btn variant="outline" onClick={addItem}>Add</Btn>
         </div>}
@@ -1983,7 +1983,7 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
       {/* Editable fields — only when Pending */}
       {isPending
         ? <div style={{display:"grid",gap:12}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
               <Sel label="Type" value={type} onChange={e=>setType(e.target.value)}>
                 <option>Outbound</option><option>Inbound</option><option>Transfer</option>
               </Sel>
@@ -2005,7 +2005,7 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
               <input value={destination} onChange={e=>setDestination(e.target.value)}
                 placeholder="Customer or location name" style={{...inputStyle,width:"100%"}}/>
             </Field>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
               <Field label="Quote Number">
                 <input value={quoteNumber} onChange={e=>setQuoteNumber(e.target.value)}
                   placeholder="e.g. 4113" style={inputStyle}/>
@@ -2033,7 +2033,7 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
             </div>
           </div>
         : <div style={{display:"grid",gap:12}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
               {[["Destination",destination],["Created",lp.createdAt||lp.created_at],["Line Items",items.length],["Total Qty",items.reduce((a,b)=>a+b.qty,0)]].map(([l,v])=>(
                 <div key={l}><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>
                   <div style={{fontFamily:["Line Items","Total Qty"].includes(l)?"monospace":"sans-serif",fontSize:["Line Items","Total Qty"].includes(l)?22:14,fontWeight:700,color:C.navy}}>{v}</div></div>
@@ -2046,7 +2046,7 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
               {customer.phone&&<div style={{fontSize:12,color:C.textMid}}>📞 {customer.phone}</div>}
             </div>}
             {lp.packing_slip_type&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Packing Slip Type</div><Badge color="gray">📋 {lp.packing_slip_type}</Badge></div>}
-            {(lp.quote_number||lp.po_number)&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            {(lp.quote_number||lp.po_number)&&<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
               {lp.quote_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Quote Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.quote_number}</div></div>}
               {lp.po_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>P.O. Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.po_number}</div></div>}
             </div>}
@@ -2128,8 +2128,8 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
 
         {/* Add item — only when Pending */}
         {isPending&&availParts.length>0&&(
-          <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:12,marginTop:8,display:"flex",gap:8,alignItems:"flex-end"}}>
-            <div style={{flex:1}}>
+          <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:12,marginTop:8,display:"flex",flexWrap:"wrap",gap:8,alignItems:"flex-end"}}>
+            <div style={{flex:"1 1 100%",minWidth:0}}>
               <Sel value={addPartId} onChange={e=>setAddPartId(e.target.value)}>
                 <option value="">Add a part…</option>
                 {availParts.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}
@@ -2242,7 +2242,7 @@ function NameHeader({ record, onSave, onDelete, deleteLabel }) {
   const [name,setName]=useState(record.name); const [desc,setDesc]=useState(record.description||""); const [busy,run]=useRun();
   const dirty = name!==record.name || desc!==(record.description||"");
   return <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,marginBottom:12,display:"grid",gap:10}}>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+    <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
       <Input label="Name" value={name} onChange={e=>setName(e.target.value)}/>
       <Input label="Description" value={desc} onChange={e=>setDesc(e.target.value)}/>
     </div>
@@ -2368,7 +2368,7 @@ function NewOrderModal({ customers, actions, onClose, onCreated }) {
         <option value="">Select customer…</option>
         {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
       </Sel>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Input label="Quote number" value={f.quote_number} onChange={set("quote_number")} placeholder="e.g. 4113"/>
         <Input label="Customer P.O. number" value={f.po_number} onChange={set("po_number")} placeholder="e.g. 26-200-02"/>
       </div>
@@ -2521,7 +2521,7 @@ function OrderDetailModal({ order, customers, orderLines, maintLines, vesselMode
       </div>
       <div style={{display:"grid",gap:10,background:C.offWhite,borderRadius:8,padding:12}}>
         <Sel label="Customer" value={f.customer_id} onChange={set("customer_id")}><option value="">Select customer…</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</Sel>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
           <Input label="Quote number" value={f.quote_number} onChange={set("quote_number")}/>
           <Input label="Customer P.O. number" value={f.po_number} onChange={set("po_number")}/>
         </div>
@@ -2630,7 +2630,7 @@ function ItemSettingsModal({ part, procurement, suppliers, actions, onClose }) {
         {Object.entries(POLICY_INFO).map(([k,[n]])=><option key={k} value={k}>{n}</option>)}
       </Sel>
       <div style={{fontSize:11,color:C.textMid,marginTop:-6}}>{POLICY_INFO[f.policy][1]}</div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Sel label="Preferred supplier" value={f.preferred_supplier_id} onChange={set("preferred_supplier_id")}>
           <option value="">Cheapest linked supplier</option>{linked.map(s=><option key={s.supplierId} value={s.supplierId}>{supName(s.supplierId)}</option>)}
         </Sel>
@@ -2638,7 +2638,7 @@ function ItemSettingsModal({ part, procurement, suppliers, actions, onClose }) {
           <option value="">Next cheapest</option>{linked.map(s=><option key={s.supplierId} value={s.supplierId}>{supName(s.supplierId)}</option>)}
         </Sel>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Input label="Lead time override (days)" type="number" min="0" value={f.lead_time_days} onChange={set("lead_time_days")} placeholder="Use supplier lead time"/>
         <Input label="Extra lead-time buffer (days)" type="number" min="0" value={f.lead_buffer_days} onChange={set("lead_buffer_days")}/>
       </div>
@@ -2647,7 +2647,7 @@ function ItemSettingsModal({ part, procurement, suppliers, actions, onClose }) {
         <Input label="Order multiple (pack)" type="number" min="1" value={f.order_multiple} onChange={set("order_multiple")}/>
         <Sel label="Service level" value={f.service_level} onChange={set("service_level")}>{SERVICE_LEVELS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</Sel>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Input label={f.policy==="min_max"?"Min qty":"Minimum on hand (safety floor)"} type="number" min="0" value={f.min_qty} onChange={set("min_qty")} placeholder="optional"/>
         {f.policy==="min_max"&&<Input label="Max qty" type="number" min="0" value={f.max_qty} onChange={set("max_qty")}/>}
         {["reorder_point","fixed_interval"].includes(f.policy)&&<Input label="Review / cover period (days)" type="number" min="1" value={f.review_interval_days} onChange={set("review_interval_days")} placeholder="30"/>}
@@ -2887,7 +2887,7 @@ function PoDetailModal({ po, lines, supplier, parts, actions, onClose }) {
         <div style={{textAlign:"right"}}><Badge color={poStatusColor(po.status)}>{po.status}</Badge><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy,marginTop:4}}>{money(total)}</div></div>
       </div>
       <div style={{background:C.offWhite,borderRadius:8,padding:12,display:"grid",gap:10}}>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:10}}>
           <Field label="Order date"><input type="date" value={f.order_date} onChange={e=>setF(p=>({...p,order_date:e.target.value}))} style={inputStyle}/></Field>
           <Field label="Expected delivery"><input type="date" value={f.expected_date} onChange={e=>setF(p=>({...p,expected_date:e.target.value}))} style={inputStyle}/></Field>
         </div>
