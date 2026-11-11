@@ -399,15 +399,92 @@ function useData() {
     await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
   }
-  async function updateLPStatus(lpId,status){
-    const lp=lps.find(l=>l.id===lpId);
-    await _sb.from("license_plates").update({status}).eq("id",lpId);
-    await logAudit("lp_status","license_plate",lpId,{from:lp?.status,to:status});
+  // ── Picking into a license plate (shipping container) ─────────────────────
+  // A pick removes stock from the TGO warehouse immediately. Stock is drawn from the
+  // supplier-attributed rows first (preferred supplier first), then from any unassigned
+  // remainder of parts.stock. Each pick records its source chunks so an undo, or a
+  // cancelled LP, returns the stock exactly where it came from.
+  async function pickLpItem(lpId, items, partId, qty=1){
+    const idx=items.findIndex(i=>i.partId===partId);
+    if(idx<0) throw new Error("That part is not on this license plate.");
+    const it=items[idx];
+    const n=Math.min(Math.max(1,+qty||1), it.qty-(it.picked||0));
+    if(n<=0) throw new Error("This line is already fully picked.");
+    const {data:pr,error:pe}=await _sb.from("parts").select("stock,description").eq("id",partId).single();
+    if(pe||!pr) throw new Error("Part not found.");
+    const onHand=pr.stock||0;
+    if(onHand<n) throw new Error(`Only ${onHand} of ${partId} in stock. Adjust the stock count, or leave the line short.`);
+    const {data:rows}=await _sb.from("supplier_stock").select("supplier_id,qty").eq("part_id",partId);
+    const pref=procurement.find(p=>p.part_id===partId)?.preferred_supplier_id;
+    const src=(rows||[]).filter(r=>r.qty>0).sort((a,b)=>((b.supplier_id===pref)-(a.supplier_id===pref))||(b.qty-a.qty));
+    let left=n; const taken=[];
+    for(const r of src){
+      if(left<=0) break;
+      const t=Math.min(r.qty,left);
+      await dbRun(_sb.from("supplier_stock").update({qty:r.qty-t,updated_at:new Date().toISOString()}).eq("part_id",partId).eq("supplier_id",r.supplier_id));
+      taken.push({supplierId:r.supplier_id,qty:t}); left-=t;
+    }
+    if(left>0) taken.push({supplierId:null,qty:left});   // stock not attributed to a supplier
+    await dbRun(_sb.from("parts").update({stock:onHand-n}).eq("id",partId));
+    const next=items.map((x,i)=>i===idx?{...x,picked:(x.picked||0)+n,picks:[...(x.picks||[]),...taken]}:x);
+    await dbRun(_sb.from("license_plates").update({items:next}).eq("id",lpId));
+    await logAudit("stock_adjust","part",partId,{from:onHand,to:onHand-n,source:"lp_pick",license_plate:lpId,qty:n,taken});
+    await fetchAll();
+    return next;
   }
-  async function updateLP(lpId, changes) {
+  // Put stock back where it came from. chunks = [{supplierId, qty}]
+  async function restoreStock(partId, chunks, lpId, why){
+    const total=chunks.reduce((s,c)=>s+c.qty,0);
+    if(total<=0) return;
+    const {data:pr}=await _sb.from("parts").select("stock").eq("id",partId).single();
+    const onHand=pr?.stock||0;
+    for(const c of chunks){
+      if(!c.supplierId) continue;
+      const {data:row}=await _sb.from("supplier_stock").select("qty").eq("part_id",partId).eq("supplier_id",c.supplierId).maybeSingle();
+      await dbRun(_sb.from("supplier_stock").upsert({part_id:partId,supplier_id:c.supplierId,qty:(row?.qty||0)+c.qty,updated_at:new Date().toISOString()},{onConflict:"part_id,supplier_id"}));
+    }
+    await dbRun(_sb.from("parts").update({stock:onHand+total}).eq("id",partId));
+    await logAudit("stock_adjust","part",partId,{from:onHand,to:onHand+total,source:why,license_plate:lpId,qty:total});
+  }
+  async function unpickLpItem(lpId, items, partId, qty=1){
+    const idx=items.findIndex(i=>i.partId===partId);
+    if(idx<0) throw new Error("That part is not on this license plate.");
+    const it=items[idx];
+    const n=Math.min(Math.max(1,+qty||1), it.picked||0);
+    if(n<=0) throw new Error("Nothing picked on this line to undo.");
+    let left=n; const back=[]; const kept=[...(it.picks||[])];
+    while(left>0&&kept.length){            // newest picks come back first
+      const c=kept[kept.length-1]; const t=Math.min(c.qty,left);
+      back.push({supplierId:c.supplierId,qty:t}); left-=t;
+      if(t===c.qty) kept.pop(); else kept[kept.length-1]={...c,qty:c.qty-t};
+    }
+    await restoreStock(partId,back,lpId,"lp_unpick");
+    const next=items.map((x,i)=>i===idx?{...x,picked:(x.picked||0)-n,picks:kept}:x);
+    await dbRun(_sb.from("license_plates").update({items:next}).eq("id",lpId));
+    await fetchAll();
+    return next;
+  }
+  // Cancelled LP: every picked part goes back to stock. Returns the cleaned items.
+  async function releasePicks(lpId, items){
+    const out=[];
+    for(const it of items||[]){
+      if((it.picked||0)>0) await restoreStock(it.partId,it.picks||[{supplierId:null,qty:it.picked}],lpId,"lp_cancel");
+      out.push({...it,picked:0,picks:[]});
+    }
+    return out;
+  }
+  async function updateLPStatus(lpId,status,meta={}){
     const lp=lps.find(l=>l.id===lpId);
+    const upd={status};
+    if(status==="Cancelled"&&lp?.status!=="Cancelled") upd.items=await releasePicks(lpId,lp?.items);
+    await _sb.from("license_plates").update(upd).eq("id",lpId);
+    await logAudit("lp_status","license_plate",lpId,{from:lp?.status,to:status,...meta});
+  }
+  async function updateLP(lpId, changes, meta={}) {
+    const lp=lps.find(l=>l.id===lpId);
+    if(changes.status==="Cancelled"&&lp?.status!=="Cancelled") changes={...changes,items:await releasePicks(lpId,changes.items||lp?.items)};
     await _sb.from("license_plates").update(changes).eq("id",lpId);
-    await logAudit("lp_edit","license_plate",lpId,{before:{type:lp?.type,destination:lp?.destination,items:lp?.items},after:changes});
+    await logAudit("lp_edit","license_plate",lpId,{before:{type:lp?.type,destination:lp?.destination,items:lp?.items},after:changes,...meta});
   }
   async function addMfgBarcode(partId,supplierId,barcode,description){
     await _sb.from("mfg_barcodes").insert({part_id:partId,supplier_id:supplierId||null,barcode:barcode.trim(),description:description||null});
@@ -601,7 +678,7 @@ function useData() {
 
   return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
-    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine}};
@@ -1671,7 +1748,7 @@ function InventoryTab({ parts, suppliers }) {
 }
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
-function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, actions }) {
+function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, mfgBarcodes, actions }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
@@ -1707,7 +1784,7 @@ function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, actions }) 
       {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
     </div>
     {showCreate&&<CreateLpModal parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setViewLp(null)}/>}
+    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)}/>}
   </div>;
 }
 
@@ -1782,7 +1859,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
-function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClose }) {
+function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose }) {
   const isPending = lp.status === "Pending";
   const [status,setStatus]=useState(lp.status);
   const [destination,setDestination]=useState(lp.destination||"");
@@ -1799,13 +1876,61 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClos
   const [newTypeInput,setNewTypeInput]=useState("");
   const [addingType,setAddingType]=useState(false);
 
+  // ── Picking (Outbound, Pending): scanning a part moves stock into this container ──
+  const canPick = isPending && type==="Outbound";
+  const [scanning,setScanning]=useState(false);
+  const [scanCode,setScanCode]=useState("");
+  const [scanQty,setScanQty]=useState(1);
+  const [pickMsg,setPickMsg]=useState(null);   // {ok:boolean, text:string}
+  const pickedOf=it=>it.picked||0;
+  const shortLines=items.filter(it=>pickedOf(it)<it.qty);
+
+  function resolvePart(code){
+    const c=(code||"").trim();
+    if(!c) return null;
+    const direct=parts.find(p=>p.id.toUpperCase()===c.toUpperCase());
+    if(direct) return direct.id;
+    const mb=(mfgBarcodes||[]).find(b=>(b.barcode||"").trim()===c);
+    return mb?mb.part_id:null;
+  }
+  async function pick(code, qty=scanQty){
+    const partId=resolvePart(code);
+    if(!partId){ setPickMsg({ok:false,text:`Unknown barcode "${code}".`}); return; }
+    if(!items.find(i=>i.partId===partId)){ setPickMsg({ok:false,text:`${partId} is not on this license plate. Nothing changed.`}); return; }
+    try{
+      const next=await actions.pickLpItem(lp.id,items,partId,qty);
+      setItems(next);
+      const it=next.find(i=>i.partId===partId); const p=parts.find(x=>x.id===partId);
+      setPickMsg({ok:true,text:`Picked ${p?.description||partId} — ${it.picked} of ${it.qty}`});
+    }catch(e){ setPickMsg({ok:false,text:e.message}); }
+  }
+  async function unpick(partId){
+    try{
+      const next=await actions.unpickLpItem(lp.id,items,partId,1);
+      setItems(next);
+      setPickMsg({ok:true,text:`Returned 1 × ${partId} to inventory.`});
+    }catch(e){ setPickMsg({ok:false,text:e.message}); }
+  }
+
   async function save(){
-    setSaving(true);
-    if(isPending){
-      await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null,customer_id:customerId||null});
-    } else {
-      await actions.updateLPStatus(lp.id,status);
+    // Shipping alert: an outbound LP can ship short, but never silently.
+    let meta={};
+    if(status==="Shipped"&&lp.status!=="Shipped"&&type==="Outbound"&&shortLines.length>0){
+      const lines=shortLines.map(it=>`• ${it.partId}: picked ${pickedOf(it)} of ${it.qty} (${it.qty-pickedOf(it)} short)`).join("\n");
+      if(!window.confirm(`⚠ This license plate is SHORT.\n\n${lines}\n\nShip anyway?`)) return;
+      meta={shipped_short:shortLines.map(it=>({partId:it.partId,ordered:it.qty,picked:pickedOf(it),short:it.qty-pickedOf(it)}))};
     }
+    if(status==="Cancelled"&&lp.status!=="Cancelled"&&items.some(it=>pickedOf(it)>0)){
+      if(!window.confirm("Cancel this license plate? Everything picked into it will be returned to inventory.")) return;
+    }
+    setSaving(true);
+    try{
+      if(isPending){
+        await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null,customer_id:customerId||null},meta);
+      } else {
+        await actions.updateLPStatus(lp.id,status,meta);
+      }
+    }catch(e){ setPickMsg({ok:false,text:e.message}); setSaving(false); return; }
     setSaving(false);
     onClose();
   }
@@ -1816,8 +1941,8 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClos
     setItems(prev=>[...prev,{partId:addPartId,qty:+addQty||1}]);
     setAddPartId(""); setAddQty(1);
   }
-  function removeItem(idx){ setItems(prev=>prev.filter((_,i)=>i!==idx)); }
-  function updateQty(idx,qty){ setItems(prev=>prev.map((it,i)=>i===idx?{...it,qty:Math.max(1,+qty||1)}:it)); }
+  function removeItem(idx){ setItems(prev=>prev.filter((it,i)=>i!==idx||pickedOf(it)>0)); }   // picked lines: undo first
+  function updateQty(idx,qty){ setItems(prev=>prev.map((it,i)=>i===idx?{...it,qty:Math.max(pickedOf(it),1,+qty||1)}:it)); }
 
   const availParts=parts.filter(p=>!items.find(i=>i.partId===p.id));
 
@@ -1926,18 +2051,49 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, actions, onClos
         {saving?"Saving…":"💾 Save Changes"}
       </Btn>
 
+      {/* Pick panel — scan parts into the shipping container */}
+      {canPick&&(
+        <div style={{background:"#FFF8E8",border:`1.5px solid ${C.amber}`,borderRadius:7,padding:12,display:"grid",gap:8}}>
+          <div style={{fontWeight:800,fontSize:12,color:C.navy,letterSpacing:1,textTransform:"uppercase"}}>
+            Picking · {items.reduce((a,b)=>a+pickedOf(b),0)} of {items.reduce((a,b)=>a+b.qty,0)} picked
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <input autoFocus value={scanCode} onChange={e=>setScanCode(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&scanCode.trim()){pick(scanCode);setScanCode("");}}}
+              placeholder="Scan or type part barcode" style={{...inputStyle,flex:1,fontFamily:"monospace"}}/>
+            <input type="number" min="1" value={scanQty} onChange={e=>setScanQty(e.target.value)} title="Quantity per scan"
+              style={{...inputStyle,width:60,fontFamily:"monospace",textAlign:"center"}}/>
+            <Btn variant="outline" onClick={()=>setScanning(true)}>📷</Btn>
+          </div>
+          {pickMsg&&<div style={{fontSize:12,fontWeight:600,color:pickMsg.ok?"#1A6B42":C.red}}>{pickMsg.ok?"✓ ":"⚠ "}{pickMsg.text}</div>}
+          {scanning&&<CameraScanner onScan={bc=>{setScanning(false);pick(bc);}} onClose={()=>setScanning(false)} hint="Scan the part barcode to add it to this shipment"/>}
+        </div>
+      )}
+
       {/* Line items — editable when Pending */}
       <div>
         <SectionTitle>Shipment Contents ({items.length} items · {items.reduce((a,b)=>a+b.qty,0)} total qty)</SectionTitle>
+        {lp.status==="Shipped"&&shortLines.length>0&&type==="Outbound"&&(
+          <div style={{background:"#FFF0F2",border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"8px 12px",marginBottom:8,fontSize:12,color:C.red,fontWeight:700}}>
+            ⚠ Shipped short — {shortLines.map(it=>`${it.partId} (${it.qty-pickedOf(it)} short)`).join(", ")}
+          </div>
+        )}
         {items.map((it,i)=>{
           const p=parts.find(x=>x.id===it.partId);
           return (
-            <div key={i} style={{border:`1.5px solid ${C.border}`,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div key={i} style={{border:`1.5px solid ${pickedOf(it)>=it.qty&&canPick?"#6FBF8E":C.border}`,background:pickedOf(it)>=it.qty&&canPick?"#F1FAF4":C.white,borderRadius:7,padding:12,marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div style={{flex:1}}>
                 {p?.image_url&&<img src={p.image_url} alt={it.partId} style={{width:40,height:40,objectFit:"cover",borderRadius:4,float:"right",marginLeft:8}}/>}
                 <BarcodeDisplay code={it.partId}/>
                 <div style={{fontWeight:700,fontSize:13,color:C.navy,marginTop:4}}>{p?.description||"—"}</div>
-                <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}</div>
+                <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}{p?.location?` · 📍 ${p.location}`:""}</div>
+                {(canPick||pickedOf(it)>0)&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+                  <Badge color={pickedOf(it)>=it.qty?"green":pickedOf(it)>0?"amber":"gray"}>Picked {pickedOf(it)} / {it.qty}</Badge>
+                  {canPick&&<>
+                    <button onClick={()=>pick(it.partId,1)} disabled={pickedOf(it)>=it.qty} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>+1</button>
+                    <button onClick={()=>unpick(it.partId)} disabled={pickedOf(it)<=0} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>↩ Undo</button>
+                  </>}
+                </div>}
               </div>
               <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,marginLeft:10}}>
                 {isPending&&<>
@@ -2870,7 +3026,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
-          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions}/>
+          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
