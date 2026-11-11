@@ -831,7 +831,7 @@ function CameraScanner({ onScan, onClose, hint="" }) {
 
 // ─── Part numbers ─────────────────────────────────────────────────────────────
 // Primary id = "CT-" + new part number (e.g. CT-5100). The old number is kept as legacy_part_no.
-// Parts still waiting for a new number keep their old id (CT-BC-####) and show a Pending flag.
+// Parts still waiting for a new number keep CT-<old number> and show a Pending flag (old CT-BC-#### labels still scan).
 const PART_PREFIX = "CT-";
 function findPartByCode(parts, raw){
   const t=(raw||"").trim().toUpperCase();
@@ -840,7 +840,7 @@ function findPartByCode(parts, raw){
   if(p) return p;
   p=parts.find(x=>x.new_part_no&&String(x.new_part_no).toUpperCase()===t);
   if(p) return p;
-  const leg=parts.filter(x=>x.legacy_part_no&&(String(x.legacy_part_no).toUpperCase()===t||`CT-BC-${x.legacy_part_no}`.toUpperCase()===t));
+  const leg=parts.filter(x=>x.legacy_part_no&&(String(x.legacy_part_no).toUpperCase()===t||`CT-${x.legacy_part_no}`.toUpperCase()===t||`CT-BC-${x.legacy_part_no}`.toUpperCase()===t));
   return leg.length===1?leg[0]:null;
 }
 function partMatchesSearch(p, q){
@@ -1513,7 +1513,7 @@ function CsvImportModal({ type, actions, existingRecords, onClose }) {
             await _sb.from("parts").update({description:row.description,category:row.category,uom:row.uom,stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location}).eq("id",row.id);
             await logAudit("part_edit","part",row.id,{source:"csv_import"});
           } else {
-            const nm=/^CT-(\w+)$/i.exec(row.id||""); const isNew=!!nm&&!/^BC-/i.test(nm[1]);
+            const nm=/^CT-(\w+)$/i.exec(row.id||""); const isNew=!!nm&&String(row.legacy_part_no||"")!==nm[1]; // CT-<same as old no.> = new number still pending
             await _sb.from("parts").insert({id:row.id,new_part_no:isNew?nm[1]:null,legacy_part_no:row.legacy_part_no||null,new_no_pending:!isNew,description:row.description,category:row.category,uom:row.uom||"EA",stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location});
             await logAudit("part_add","part",row.id,{source:"csv_import"});
           }

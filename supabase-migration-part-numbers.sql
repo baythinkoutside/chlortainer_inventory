@@ -155,3 +155,6 @@ end $$;
 
 -- 7) flag the rest as pending
 update parts set new_no_pending = true where new_part_no is null;
+
+-- 2026-11-11: pending parts drop the BC segment (CT-BC-2205 -> CT-2205). Applied as migration drop_bc_from_pending_part_ids.
+-- update parts set id = 'CT-' || replace(id,'CT-BC-','') where id like 'CT-BC-%' and new_no_pending;
