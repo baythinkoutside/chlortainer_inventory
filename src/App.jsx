@@ -1091,81 +1091,12 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
 }
 
 // ─── Parts Tab ────────────────────────────────────────────────────────────────
-// ─── Shelf tags: Avery 5163 (2" x 4", 10 per sheet) with QR + Code 128 ────────
-const escHtml = (v) => String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-function printShelfTags(list) {
-  if (!list.length) return;
-  const labels = list.map((p,i)=>`
-    <div class="tag">
-      <div class="top">
-        ${p.image_url?`<img class="thumb" src="${escHtml(p.image_url)}" alt=""/>`:`<div class="thumb ph"></div>`}
-        <div class="txt">
-          <div class="sku">${escHtml(p.id)}</div>
-          <div class="desc">${escHtml(p.description)}</div>
-          <div class="meta">UOM: ${escHtml(p.uom||"EA")}${p.location?` &nbsp;·&nbsp; <b class="loc">Bin ${escHtml(p.location)}</b>`:""}</div>
-        </div>
-      </div>
-      <div class="bottom">
-        <div class="qr" data-qr="${escHtml(p.id)}"></div>
-        <div class="bcwrap"><svg class="bc" data-bc="${escHtml(p.id)}"></svg><div class="bctxt">${escHtml(p.id)}</div></div>
-      </div>
-    </div>`);
-  const sheets = [];
-  for (let i=0;i<labels.length;i+=10) sheets.push(`<div class="sheet">${labels.slice(i,i+10).join("")}</div>`);
-  const w = window.open("","_blank");
-  if (!w) { alert("Pop-up blocked. Allow pop-ups for this site to print tags."); return; }
-  w.document.write(`<!DOCTYPE html><html><head><title>Shelf Tags</title>
-    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-    <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"><\/script>
-    <style>
-      @page { size: letter; margin: 0; }
-      * { box-sizing: border-box; }
-      body { margin: 0; font-family: Arial, sans-serif; color: #1C2B3A; }
-      .sheet { width: 8.5in; height: 11in; padding: 0.5in 0.156in 0; display: grid;
-               grid-template-columns: 4in 4in; column-gap: 0.188in; grid-auto-rows: 2in; page-break-after: always; }
-      .tag { width: 4in; height: 2in; padding: 0.09in 0.14in; border: 0.5pt dashed #ccc; overflow: hidden; }
-      .top { display: flex; gap: 0.12in; height: 0.92in; align-items: center; padding-bottom: 0.05in; border-bottom: 1.5pt solid #1C2B3A; }
-      .thumb { width: 0.82in; height: 0.82in; object-fit: contain; flex-shrink: 0; border: 1pt solid #1C2B3A; border-radius: 6px; }
-      .ph { border: 1pt dashed #999; }
-      .txt { flex: 1; min-width: 0; }
-      .sku { font-family: "Courier New", monospace; font-weight: 800; font-size: 15pt; letter-spacing: .3px; }
-      .desc { font-size: 10pt; font-weight: 700; line-height: 1.15; margin: 2px 0 4px; max-height: 2.3em; overflow: hidden; }
-      .meta { font-size: 8.5pt; }
-      .loc { color: #C8102E; font-size: 10.5pt; }
-      .bottom { display: flex; gap: 0.1in; align-items: center; height: 0.8in; padding-top: 0.06in; }
-      .qr { width: 0.68in; height: 0.68in; flex-shrink: 0; }
-      .qr svg { width: 100%; height: 100%; }
-      .bcwrap { flex: 1; min-width: 0; }
-      .bc { width: 100%; height: 0.5in; display: block; }
-      .bctxt { text-align: center; font-family: "Courier New", monospace; font-size: 8.5pt; letter-spacing: 1px; margin-top: 1px; }
-      @media print { .tag { border: none; } }
-      @media screen { body { background: #eee; } .sheet { background: #fff; margin: 12px auto; } }
-    </style></head>
-    <body onload="go()">${sheets.join("")}
-    <script>
-      function go(){
-        document.querySelectorAll("[data-qr]").forEach(function(el){
-          var q=qrcode(0,"M"); q.addData(el.getAttribute("data-qr")); q.make();
-          el.innerHTML=q.createSvgTag({cellSize:4,margin:0,scalable:true});
-        });
-        document.querySelectorAll("svg[data-bc]").forEach(function(el){
-          JsBarcode(el,el.getAttribute("data-bc"),{format:"CODE128",width:2,height:50,displayValue:false,margin:0,lineColor:"#1C2B3A"});
-          el.setAttribute("preserveAspectRatio","none");
-        });
-        var imgs=Array.prototype.slice.call(document.images);
-        Promise.all(imgs.map(function(i){return i.complete?1:new Promise(function(r){i.onload=i.onerror=r;});})).then(function(){setTimeout(function(){window.print();},300);});
-      }
-    <\/script></body></html>`);
-  w.document.close();
-}
-
 function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("All");
   const [showAdd,setShowAdd]=useState(false);
   const [showImport,setShowImport]=useState(false);
   const [viewPart,setViewPart]=useState(null);
-  const [selected,setSelected]=useState(()=>new Set());
   const [form,setForm]=useState({description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});
   const [saving,setSaving]=useState(false);
   const cats=["All",...Array.from(new Set(parts.map(p=>p.category)))];
@@ -1180,24 +1111,10 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
       <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
       <Btn onClick={()=>setShowAdd(true)}>+ Add Part</Btn>
     </div>
-    <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center",background:C.offWhite,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px 12px"}}>
-      <span style={{fontSize:12,fontWeight:700,color:C.navy}}>🏷 Shelf tags</span>
-      <span style={{fontSize:12,color:C.textLight}}>{selected.size} selected</span>
-      <Btn variant="outline" style={{padding:"4px 10px",fontSize:12}} onClick={()=>setSelected(new Set(filtered.map(p=>p.id)))}>Select all shown ({filtered.length})</Btn>
-      {selected.size>0&&<Btn variant="outline" style={{padding:"4px 10px",fontSize:12}} onClick={()=>setSelected(new Set())}>Clear</Btn>}
-      <Btn style={{padding:"4px 12px",fontSize:12}} disabled={filtered.length===0} onClick={()=>{
-        const list=selected.size>0?parts.filter(p=>selected.has(p.id)):filtered;
-        if(selected.size===0&&!window.confirm(`Nothing is ticked. Print tags for all ${filtered.length} parts shown?`))return;
-        printShelfTags(list);
-      }}>🖨️ Print tags{selected.size>0?` (${selected.size})`:""}</Btn>
-    </div>
     <div style={{display:"grid",gap:10}}>
       {filtered.map(p=>(
         <div key={p.id} onClick={()=>setViewPart(p)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px",display:"flex",alignItems:"center",gap:16,cursor:"pointer",transition:"border-color .15s"}}
           onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
-          <input type="checkbox" checked={selected.has(p.id)} onClick={e=>e.stopPropagation()}
-            onChange={e=>setSelected(prev=>{const n=new Set(prev);e.target.checked?n.add(p.id):n.delete(p.id);return n;})}
-            style={{width:20,height:20,flexShrink:0,cursor:"pointer",accentColor:C.red}} title="Select for shelf tag"/>
           <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
             {p.image_url
               ? <img src={p.image_url} alt={p.id} style={{width:56,height:56,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`}}/>
