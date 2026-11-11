@@ -20,7 +20,7 @@ export const LABEL_SIZES = {
   },
 };
 
-const PREF_KEY = "chlortainer_binlabel_prefs";
+const PREF_KEY = "chlortainer_binlabel_prefs_v2";
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch { return {}; }
 }
@@ -37,6 +37,7 @@ function labelHtml(p, size, opts) {
   const desc = esc(p.description);
   const meta = [`UOM: ${esc(p.uom || "EA")}`];
   if (opts.showMin && +p.minStock > 0) meta.push(`Min: ${+p.minStock}`);
+  if (opts.showLoc && p.location) meta.push(`<b class="loc">Bin ${esc(p.location)}</b>`);
 
   if (!size.full) {
     return `<div class="lbl compact">
@@ -73,15 +74,18 @@ function buildDoc(list, size, opts, autoPrint) {
   let body, pageCss;
   if (size.mode === "sheet") {
     const skip = Math.max(0, Math.min(size.perPage - 1, +opts.skip || 0));
-    const cells = [...Array(skip).fill('<div class="lbl empty"></div>'), ...labels];
+    const cells = [...Array(skip).fill(null), ...labels];
     const pages = [];
     for (let i = 0; i < cells.length; i += size.perPage) pages.push(cells.slice(i, i + size.perPage));
-    body = pages.map((pg) => `<div class="sheet">${pg.join("")}</div>`).join("");
+    // Each label is placed at a fixed position on its sheet (not flowed in a grid),
+    // so phones, tablets and desktops all paginate the same way: perPage labels per sheet.
+    body = pages.map((pg) => `<div class="sheet">${pg.map((c, j) => c === null ? "" :
+      `<div class="cell" style="left:${(size.left + (j % size.cols) * (W + size.colGap)).toFixed(4)}in;top:${(size.top + Math.floor(j / size.cols) * H).toFixed(4)}in">${c}</div>`).join("")}</div>`).join("");
     pageCss = `@page{size:letter;margin:0}
-      .sheet{width:8.5in;height:11in;padding:${size.top}in 0 0 ${size.left}in;display:grid;
-        grid-template-columns:repeat(${size.cols},${W}in);column-gap:${size.colGap}in;grid-auto-rows:${H}in;
-        page-break-after:always;break-after:page;overflow:hidden}
+      html,body{width:8.5in}
+      .sheet{position:relative;width:8.5in;height:10.99in;overflow:hidden;page-break-after:always;break-after:page}
       .sheet:last-child{page-break-after:auto;break-after:auto}
+      .cell{position:absolute}
       @media screen{.sheet{outline:1px dashed #bbb;margin:0 auto 16px;background:#fff}}`;
   } else {
     body = labels.map((l) => `<div class="pg">${l}</div>`).join("");
@@ -91,7 +95,7 @@ function buildDoc(list, size, opts, autoPrint) {
       @media screen{.pg{outline:1px dashed #bbb;margin:0 auto 12px;background:#fff}}`;
   }
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Bin Labels (${list.length})</title>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=816"><title>Bin Labels (${list.length})</title>
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"><\/script>
 <style>
@@ -109,6 +113,7 @@ ${pageCss}
 .full .pid{font-family:"Courier New",monospace;font-weight:900;font-size:${14 * f}pt;letter-spacing:.3px;line-height:1}
 .full .desc{flex:0 1 auto;min-height:0;font-weight:700;font-size:${9 * f}pt;line-height:1.15;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .full .meta{flex-shrink:0;font-size:${7.5 * f}pt;margin-top:auto}
+.full .loc{color:#C8102E;font-size:${9.5 * f}pt}
 .full .bot{flex:1;display:flex;align-items:center;gap:${0.08 * k}in;min-height:0;padding-top:${0.05 * k}in;border-top:1.5px solid #000;margin-top:${0.05 * k}in}
 .full .qr{flex:0 0 auto;height:100%;aspect-ratio:1}
 .full .qr svg{width:100%;height:100%;display:block}
@@ -155,9 +160,10 @@ export function printBinLabels(list, sizeKey, opts, autoPrint = true) {
 export default function BinLabelsTab({ parts, ui }) {
   const { C, Btn, Input, Sel, SectionTitle } = ui;
   const prefs = useMemo(loadPrefs, []);
-  const [sizeKey, setSizeKey] = useState(prefs.sizeKey && LABEL_SIZES[prefs.sizeKey] ? prefs.sizeKey : "3x2");
+  const [sizeKey, setSizeKey] = useState(prefs.sizeKey && LABEL_SIZES[prefs.sizeKey] ? prefs.sizeKey : "avery5163");
   const [showPhoto, setShowPhoto] = useState(prefs.showPhoto ?? true);
   const [showMin, setShowMin] = useState(prefs.showMin ?? true);
+  const [showLoc, setShowLoc] = useState(prefs.showLoc ?? true);
   const [copies, setCopies] = useState(1);
   const [skip, setSkip] = useState(0);
   const [q, setQ] = useState("");
@@ -182,8 +188,8 @@ export default function BinLabelsTab({ parts, ui }) {
   const sheets = size.mode === "sheet" ? Math.ceil((list.length + (+skip || 0)) / size.perPage) : 0;
 
   const go = (auto) => {
-    savePrefs({ sizeKey, showPhoto, showMin });
-    printBinLabels(list, sizeKey, { showPhoto, showMin, skip }, auto);
+    savePrefs({ sizeKey, showPhoto, showMin, showLoc });
+    printBinLabels(list, sizeKey, { showPhoto, showMin, showLoc, skip }, auto);
   };
 
   const chk = { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: C.textDark, cursor: "pointer" };
@@ -199,6 +205,7 @@ export default function BinLabelsTab({ parts, ui }) {
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
           {size.full && <label style={chk}><input type="checkbox" checked={showPhoto} onChange={(e) => setShowPhoto(e.target.checked)} /> Include photo</label>}
           <label style={chk}><input type="checkbox" checked={showMin} onChange={(e) => setShowMin(e.target.checked)} /> Show Min qty</label>
+          {size.full && <label style={chk}><input type="checkbox" checked={showLoc} onChange={(e) => setShowLoc(e.target.checked)} /> Show bin location</label>}
           <div style={{ width: 110 }}><Input label="Copies each" type="number" min="1" max="50" value={copies} onChange={(e) => setCopies(e.target.value)} /></div>
           {size.mode === "sheet" && <div style={{ width: 150 }}><Input label="Skip used labels" type="number" min="0" max={size.perPage - 1} value={skip} onChange={(e) => setSkip(e.target.value)} /></div>}
         </div>
