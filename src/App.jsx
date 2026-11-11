@@ -208,19 +208,22 @@ insert into part_suppliers(part_id,supplier_id,mfg_part_no,lead_days,unit_cost) 
 // ─── Login Screen ─────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
   const [email,setEmail]=useState("");
-  const [password,setPassword]=useState("");
   const [loading,setLoading]=useState(false);
+  const [sent,setSent]=useState(false);
   const [err,setErr]=useState("");
 
-  async function login(){
-    if(!email||!password) return;
+  async function sendLink(){
+    if(!email) return;
     setLoading(true); setErr("");
     try {
-      const {data,error} = await _sb.auth.signInWithPassword({email:email.trim(),password});
+      const {error} = await _sb.auth.signInWithOtp({
+        email:email.trim(),
+        options:{ shouldCreateUser:false, emailRedirectTo:window.location.origin }
+      });
       if(error) throw new Error(error.message);
-      setCurrentUser(data.user);
-      onLogin(data.user);
-    } catch(e){ setErr(e.message); setLoading(false); }
+      setSent(true);
+    } catch(e){ setErr(e.message); }
+    setLoading(false);
   }
 
   return (
@@ -234,29 +237,36 @@ function LoginScreen({ onLogin }) {
           </div>
         </div>
         <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderTop:"none",borderRadius:"0 0 10px 10px",padding:28}}>
-          <div style={{fontSize:15,fontWeight:700,color:C.navy,marginBottom:20}}>Sign in to continue</div>
-          <div style={{display:"grid",gap:14}}>
-            <Field label="Email">
-              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&login()}
-                placeholder="you@chlortainer.com"
-                style={{...inputStyle,width:"100%"}}/>
-            </Field>
-            <Field label="Password">
-              <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
-                onKeyDown={e=>e.key==="Enter"&&login()}
-                placeholder="••••••••"
-                style={{...inputStyle,width:"100%"}}/>
-            </Field>
-          </div>
-          {err&&<div style={{marginTop:12,background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ {err}</div>}
-          <Btn onClick={login} disabled={!email||!password||loading}
-            style={{width:"100%",justifyContent:"center",marginTop:16}}>
-            {loading?"Signing in…":"Sign In"}
-          </Btn>
-          <p style={{fontSize:11,color:C.textLight,margin:"12px 0 0",textAlign:"center"}}>
-            Contact your administrator to reset your password.
-          </p>
+          {sent ? (
+            <>
+              <div style={{fontSize:15,fontWeight:700,color:C.navy,marginBottom:10}}>📧 Check your email</div>
+              <p style={{fontSize:13,color:C.textMid,margin:0,lineHeight:1.5}}>
+                We sent a sign-in link to <b>{email.trim()}</b>. Open it on this device to sign in.
+              </p>
+              <Btn onClick={()=>{setSent(false);setErr("");}}
+                style={{width:"100%",justifyContent:"center",marginTop:16}}>
+                Use a different email
+              </Btn>
+            </>
+          ) : (
+            <>
+              <div style={{fontSize:15,fontWeight:700,color:C.navy,marginBottom:20}}>Sign in to continue</div>
+              <Field label="Email">
+                <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                  onKeyDown={e=>e.key==="Enter"&&sendLink()}
+                  placeholder="you@chlortainer.com"
+                  style={{...inputStyle,width:"100%"}}/>
+              </Field>
+              {err&&<div style={{marginTop:12,background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ {err}</div>}
+              <Btn onClick={sendLink} disabled={!email||loading}
+                style={{width:"100%",justifyContent:"center",marginTop:16}}>
+                {loading?"Sending…":"Email me a sign-in link"}
+              </Btn>
+              <p style={{fontSize:11,color:C.textLight,margin:"12px 0 0",textAlign:"center"}}>
+                Only registered users can sign in. Contact your administrator for access.
+              </p>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -2967,6 +2977,10 @@ function MainApp({ user, onSignOut }) {
     vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
+  const [isAdmin,setIsAdmin]=useState(user?.app_metadata?.role==="admin");
+  useEffect(()=>{ // re-read from server so admin changes apply without signing out
+    _sb.auth.getUser().then(({data})=>{ if(data?.user) setIsAdmin(data.user.app_metadata?.role==="admin"); });
+  },[]);
   const tabs=[
     {id:"scan",label:"Scan",icon:"📷"},
     {id:"parts",label:"Parts Catalog",icon:"🔩"},
@@ -2980,6 +2994,7 @@ function MainApp({ user, onSignOut }) {
     {id:"replenish",label:"Replenishment",icon:"📈"},
     {id:"pos",label:"Purchase Orders",icon:"🛒"},
     {id:"audit",label:"Audit Log",icon:"📋"},
+    ...(isAdmin?[{id:"users",label:"Users",icon:"👥"}]:[]),
   ];
   return (
     <div style={{minHeight:"100vh",background:C.offWhite}}>
@@ -3033,10 +3048,130 @@ function MainApp({ user, onSignOut }) {
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
           :tab==="pos"?<PurchaseOrdersTab purchaseOrders={purchaseOrders} poLines={poLines} suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="audit"?<AuditLogTab/>
+          :tab==="users"&&isAdmin?<UsersTab currentUserId={user?.id}/>
           :null}
       </div>
       <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 20px",textAlign:"center",background:C.white}}>
         <span style={{fontSize:11,color:C.textLight}}>© 2026 TGO Technologies, Inc. — ChlorTainer Inventory System · Keeping Operators Safe. Protecting Our Communities.</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Users Tab (admin only) ───────────────────────────────────────────────────
+async function callManageUsers(body){
+  const {data,error}=await _sb.functions.invoke("manage-users",{body});
+  if(error){
+    let msg=error.message;
+    try{ const j=await error.context.json(); if(j?.error) msg=j.error; }catch(_){}
+    throw new Error(msg);
+  }
+  if(data?.error) throw new Error(data.error);
+  return data;
+}
+
+function UsersTab({ currentUserId }) {
+  const [users,setUsers]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [email,setEmail]=useState("");
+  const [makeAdmin,setMakeAdmin]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [msg,setMsg]=useState(null); // {type:"ok"|"err", text}
+
+  async function load(){
+    setLoading(true);
+    try{ const d=await callManageUsers({action:"list"}); setUsers(d.users||[]); }
+    catch(e){ setMsg({type:"err",text:e.message}); }
+    setLoading(false);
+  }
+  useEffect(()=>{ load(); },[]);
+
+  async function invite(){
+    const addr=email.trim().toLowerCase();
+    if(!addr) return;
+    setBusy(true); setMsg(null);
+    try{
+      const d=await callManageUsers({action:"invite",email:addr,redirectTo:window.location.origin});
+      if(makeAdmin&&d.id) await callManageUsers({action:"set_admin",userId:d.id,isAdmin:true});
+      setMsg({type:"ok",text:`Invitation sent to ${addr}. They'll get an email with a sign-in link.`});
+      setEmail(""); setMakeAdmin(false);
+      await load();
+    }catch(e){ setMsg({type:"err",text:e.message}); }
+    setBusy(false);
+  }
+
+  async function toggleAdmin(u){
+    const verb=u.isAdmin?"Remove admin rights from":"Make admin:";
+    if(!window.confirm(`${verb} ${u.email}?`)) return;
+    setBusy(true); setMsg(null);
+    try{ await callManageUsers({action:"set_admin",userId:u.id,isAdmin:!u.isAdmin}); await load(); }
+    catch(e){ setMsg({type:"err",text:e.message}); }
+    setBusy(false);
+  }
+
+  async function remove(u){
+    if(!window.confirm(`Remove ${u.email}? They will no longer be able to sign in.`)) return;
+    setBusy(true); setMsg(null);
+    try{ await callManageUsers({action:"remove",userId:u.id}); setMsg({type:"ok",text:`${u.email} removed.`}); await load(); }
+    catch(e){ setMsg({type:"err",text:e.message}); }
+    setBusy(false);
+  }
+
+  const fmt=d=>d?new Date(d).toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"}):null;
+  const card={background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:20,marginBottom:20};
+
+  return (
+    <div>
+      <div style={card}>
+        <SectionTitle>Add User</SectionTitle>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+          <div style={{flex:"1 1 240px"}}>
+            <Field label="Email">
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&invite()} placeholder="name@company.com"
+                style={{...inputStyle,width:"100%"}}/>
+            </Field>
+          </div>
+          <Btn variant="navy" onClick={invite} disabled={!email.trim()||busy}>{busy?"Working…":"✉ Send Invite"}</Btn>
+        </div>
+        <label style={{display:"flex",alignItems:"center",gap:8,marginTop:12,fontSize:13,color:C.textMid,cursor:"pointer"}}>
+          <input type="checkbox" checked={makeAdmin} onChange={e=>setMakeAdmin(e.target.checked)}/>
+          Also make this user an admin (can add and remove users)
+        </label>
+        {msg&&<div style={{marginTop:14,borderRadius:6,padding:"10px 14px",fontSize:13,
+          background:msg.type==="ok"?C.greenBg:C.redLight,border:`1px solid ${msg.type==="ok"?C.greenBdr:C.redBorder}`,
+          color:msg.type==="ok"?C.greenText:C.red}}>{msg.type==="ok"?"✅":"❌"} {msg.text}</div>}
+      </div>
+
+      <div style={card}>
+        <SectionTitle>Users ({users.length})</SectionTitle>
+        {loading?<Spinner text="Loading users…"/>:
+          <div style={{display:"grid",gap:10}}>
+            {users.map(u=>{
+              const self=u.id===currentUserId;
+              return (
+                <div key={u.id} style={{border:`1px solid ${C.border}`,borderRadius:6,padding:"12px 14px",display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",justifyContent:"space-between"}}>
+                  <div style={{minWidth:0,flex:"1 1 220px"}}>
+                    <div style={{fontSize:14,fontWeight:700,color:C.navy,wordBreak:"break-all"}}>
+                      {u.email} {self&&<span style={{fontSize:11,color:C.textLight,fontWeight:400}}>(you)</span>}
+                    </div>
+                    <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap",alignItems:"center"}}>
+                      {u.isAdmin&&<Badge color="amber">Admin</Badge>}
+                      {u.lastSignInAt
+                        ?<span style={{fontSize:11,color:C.textLight}}>Last sign-in {fmt(u.lastSignInAt)}</span>
+                        :<Badge color="gray">Invited {fmt(u.invitedAt||u.createdAt)} · not signed in yet</Badge>}
+                    </div>
+                  </div>
+                  {!self&&<div style={{display:"flex",gap:8}}>
+                    <Btn variant="outline" onClick={()=>toggleAdmin(u)} disabled={busy} style={{padding:"6px 12px",fontSize:12}}>
+                      {u.isAdmin?"Remove admin":"Make admin"}
+                    </Btn>
+                    <Btn variant="danger" onClick={()=>remove(u)} disabled={busy} style={{padding:"6px 12px",fontSize:12}}>Remove</Btn>
+                  </div>}
+                </div>
+              );
+            })}
+          </div>}
       </div>
     </div>
   );
