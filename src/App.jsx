@@ -362,9 +362,13 @@ function useData() {
   },[]);
 
   async function addPart(form){
-    const id=`CT-BC-${String(parts.length+1).padStart(4,"0")}`;
-    await _sb.from("parts").insert({id,description:form.description,category:form.category,uom:form.uom,stock:+form.stock||0,min_stock:+form.minStock||0,location:form.location});
-    await logAudit("part_add","part",id,{description:form.description,category:form.category,stock:+form.stock||0});
+    const newNo=(form.newPartNo||"").trim();
+    const legacyNo=(form.legacyPartNo||"").trim();
+    if(!newNo) throw new Error("A new part number is required.");
+    const id=`${PART_PREFIX}${newNo}`;
+    if(parts.some(p=>p.id.toUpperCase()===id.toUpperCase())) throw new Error(`${id} already exists.`);
+    await dbRun(_sb.from("parts").insert({id,new_part_no:newNo,legacy_part_no:legacyNo||null,new_no_pending:false,description:form.description,category:form.category,uom:form.uom,stock:+form.stock||0,min_stock:+form.minStock||0,location:form.location}));
+    await logAudit("part_add","part",id,{description:form.description,category:form.category,stock:+form.stock||0,new_part_no:newNo,legacy_part_no:legacyNo||null});
   }
   async function uploadPartImage(partId, file) {
     const ext = file.name.split('.').pop() || 'jpg';
@@ -825,6 +829,32 @@ function CameraScanner({ onScan, onClose, hint="" }) {
   );
 }
 
+// ─── Part numbers ─────────────────────────────────────────────────────────────
+// Primary id = "CT-" + new part number (e.g. CT-5100). The old number is kept as legacy_part_no.
+// Parts still waiting for a new number keep their old id (CT-BC-####) and show a Pending flag.
+const PART_PREFIX = "CT-";
+function findPartByCode(parts, raw){
+  const t=(raw||"").trim().toUpperCase();
+  if(!t) return null;
+  let p=parts.find(x=>x.id.toUpperCase()===t);
+  if(p) return p;
+  p=parts.find(x=>x.new_part_no&&String(x.new_part_no).toUpperCase()===t);
+  if(p) return p;
+  const leg=parts.filter(x=>x.legacy_part_no&&(String(x.legacy_part_no).toUpperCase()===t||`CT-BC-${x.legacy_part_no}`.toUpperCase()===t));
+  return leg.length===1?leg[0]:null;
+}
+function partMatchesSearch(p, q){
+  const s=(q||"").toLowerCase();
+  if(!s) return true;
+  return [p.id,p.new_part_no,p.legacy_part_no,p.description].some(v=>(v||"").toString().toLowerCase().includes(s));
+}
+function LegacyNote({ p }){
+  if(!p) return null;
+  return <span style={{fontSize:11,color:C.textLight,fontFamily:"monospace"}}>
+    {p.legacy_part_no?`Old #${p.legacy_part_no}`:""}{p.new_no_pending?`${p.legacy_part_no?" · ":""}New # pending`:""}
+  </span>;
+}
+
 // ─── Manual Entry ─────────────────────────────────────────────────────────────
 function ManualEntry({ onSubmit }) {
   const [val,setVal]=useState("");
@@ -832,7 +862,7 @@ function ManualEntry({ onSubmit }) {
   return (
     <div style={{display:"flex",gap:8}}>
       <input value={val} onChange={e=>setVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}
-        placeholder="Type SKU e.g. CT-BC-0001" autoCapitalize="characters" autoCorrect="off" spellCheck={false}
+        placeholder="Type part no. e.g. CT-5100" autoCapitalize="characters" autoCorrect="off" spellCheck={false}
         style={{...inputStyle,flex:1,fontFamily:"monospace",textTransform:"uppercase"}}/>
       <Btn variant="outline" onClick={submit}>Go</Btn>
     </div>
@@ -847,6 +877,7 @@ function LookupResult({ result, parts, suppliers, onClear }) {
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"flex",justifyContent:"center",background:C.offWhite,borderRadius:8,padding:16}}>
         <BarcodeDisplay code={live.id} size="lg"/>
+        <div style={{marginTop:6,textAlign:"center"}}><LegacyNote p={live}/></div>
       </div>
       <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:16}}>
         <div style={{fontWeight:800,fontSize:16,color:C.navy,marginBottom:8}}>{live.description}</div>
@@ -937,7 +968,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
     const t=code.trim().toUpperCase();
     setLastScanned(code.trim());
     // Check CT SKU first, then fall back to product barcode lookup
-    let part=parts.find(p=>p.id.toUpperCase()===t);
+    let part=findPartByCode(parts,t);
     if(!part){
       const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===t);
       if(mfgMatch) part=parts.find(p=>p.id===mfgMatch.part_id);
@@ -1046,7 +1077,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
       </div>}
 
       {mode==="lookup"&&!result&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
-        <CameraScanner onScan={handleScan} onClose={reset} hint="Point at any CT-BC-#### barcode"/>
+        <CameraScanner onScan={handleScan} onClose={reset} hint="Point at any CT-#### barcode"/>
         <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
         <ManualEntry onSubmit={handleScan}/>
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
@@ -1097,16 +1128,16 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
   const [showAdd,setShowAdd]=useState(false);
   const [showImport,setShowImport]=useState(false);
   const [viewPart,setViewPart]=useState(null);
-  const [form,setForm]=useState({description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});
+  const [form,setForm]=useState({newPartNo:"",legacyPartNo:"",description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});
   const [saving,setSaving]=useState(false);
   const cats=["All",...Array.from(new Set(parts.map(p=>p.category)))];
-  const filtered=parts.filter(p=>(filter==="All"||p.category===filter)&&(p.id.toLowerCase().includes(search.toLowerCase())||p.description.toLowerCase().includes(search.toLowerCase())));
-  async function addPart(){if(!form.description)return;setSaving(true);await actions.addPart(form);setSaving(false);setForm({description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});setShowAdd(false);}
+  const filtered=parts.filter(p=>(filter==="All"||p.category===filter)&&partMatchesSearch(p,search));
+  async function addPart(){if(!form.description||!form.newPartNo.trim())return;setSaving(true);try{await actions.addPart(form);setForm({newPartNo:"",legacyPartNo:"",description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});setShowAdd(false);}catch(e){alert(e.message);}setSaving(false);}
   const sc=p=>p.stock===0?"red":p.stock<p.minStock?"amber":"green";
   const sl=p=>p.stock===0?"Out of Stock":p.stock<p.minStock?"Low Stock":"In Stock";
   return <div>
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
-      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search SKU or description…" style={{...inputStyle,flex:1,minWidth:180}}/>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search part no., old no. or description…" style={{...inputStyle,flex:1,minWidth:180}}/>
       <select value={filter} onChange={e=>setFilter(e.target.value)} style={inputStyle}>{cats.map(c=><option key={c}>{c}</option>)}</select>
       <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
       <Btn onClick={()=>setShowAdd(true)}>+ Add Part</Btn>
@@ -1123,7 +1154,8 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
             <BarcodeDisplay code={p.id}/>
           </div>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{fontWeight:700,fontSize:14,color:C.textDark,marginBottom:4}}>{p.description}</div>
+            <div style={{fontWeight:700,fontSize:14,color:C.textDark,marginBottom:2}}>{p.description}</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:C.amber}}>{p.id}</span><LegacyNote p={p}/></div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
               <Badge color="navy">{p.category}</Badge>
               <span style={{fontSize:12,color:C.textLight}}>📍 {p.location||"—"}</span>
@@ -1141,6 +1173,10 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
     </div>
     {showAdd&&<Modal title="Add New Part" onClose={()=>setShowAdd(false)}>
       <div style={{display:"grid",gap:14}}>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
+          <Input label="New part number (required)" value={form.newPartNo} onChange={e=>setForm(f=>({...f,newPartNo:e.target.value}))} placeholder="e.g. 5100 → CT-5100"/>
+          <Input label="Old part number (optional)" value={form.legacyPartNo} onChange={e=>setForm(f=>({...f,legacyPartNo:e.target.value}))} placeholder="e.g. 2100"/>
+        </div>
         <Input label="Description" value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="e.g. HDPE Containment Body"/>
         <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
           <Sel label="Category" value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))}>{["Containment","Seals & Gaskets","Valves","Instrumentation","Filtration","Hardware","Other"].map(c=><option key={c}>{c}</option>)}</Sel>
@@ -1256,6 +1292,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
           }}>🖨️ Print Label</Btn>
         </div>
         <BarcodeDisplay code={live.id} size="lg"/>
+        <div style={{marginTop:6,textAlign:"center"}}><LegacyNote p={live}/></div>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         {[["Description",live.description],["Category",<Badge color="navy">{live.category}</Badge>],
@@ -1396,9 +1433,9 @@ const CSV_TEMPLATES = {
     matchOn: "name",
   },
   parts: {
-    columns: ["id","description","category","uom","stock","min_stock","location"],
+    columns: ["id","description","category","uom","stock","min_stock","location","legacy_part_no"],
     required: ["id","description"],
-    example: "CT-BC-0007,Pressure Relief Valve,Valves,EA,10,5,C-03-01",
+    example: "CT-5300,Pressure Relief Valve,Valves,EA,10,5,C-03-01,2310",
     matchOn: "id",
   },
   suppliers: {
@@ -1476,7 +1513,8 @@ function CsvImportModal({ type, actions, existingRecords, onClose }) {
             await _sb.from("parts").update({description:row.description,category:row.category,uom:row.uom,stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location}).eq("id",row.id);
             await logAudit("part_edit","part",row.id,{source:"csv_import"});
           } else {
-            await _sb.from("parts").insert({id:row.id,description:row.description,category:row.category,uom:row.uom||"EA",stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location});
+            const nm=/^CT-(\w+)$/i.exec(row.id||""); const isNew=!!nm&&!/^BC-/i.test(nm[1]);
+            await _sb.from("parts").insert({id:row.id,new_part_no:isNew?nm[1]:null,legacy_part_no:row.legacy_part_no||null,new_no_pending:!isNew,description:row.description,category:row.category,uom:row.uom||"EA",stock:+row.stock||0,min_stock:+row.min_stock||0,location:row.location});
             await logAudit("part_add","part",row.id,{source:"csv_import"});
           }
         } else if (type === "suppliers") {
@@ -1898,7 +1936,7 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
   function resolvePart(code){
     const c=(code||"").trim();
     if(!c) return null;
-    const direct=parts.find(p=>p.id.toUpperCase()===c.toUpperCase());
+    const direct=findPartByCode(parts,c);
     if(direct) return direct.id;
     const mb=(mfgBarcodes||[]).find(b=>(b.barcode||"").trim()===c);
     return mb?mb.part_id:null;
@@ -2756,7 +2794,7 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
   const itemRows=useMemo(()=>{
     const procSet=new Set(procurement.map(p=>p.part_id)); const recSet=new Set(recs.map(r=>r.part_id));
     const q=search.toLowerCase();
-    return parts.filter(p=>!q||p.id.toLowerCase().includes(q)||(p.description||"").toLowerCase().includes(q))
+    return parts.filter(p=>!q||partMatchesSearch(p,q))
       .sort((a,b)=>((procSet.has(b.id)||recSet.has(b.id))-(procSet.has(a.id)||recSet.has(a.id)))||a.id.localeCompare(b.id));
   },[parts,procurement,recs,search]);
 
@@ -2840,7 +2878,7 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
     </div>}
 
     {view==="items"&&<div>
-      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search SKU or description…" style={{...inputStyle,width:"100%",marginBottom:10}}/>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search part no., old no. or description…" style={{...inputStyle,width:"100%",marginBottom:10}}/>
       <div style={{overflowX:"auto",border:`1.5px solid ${C.border}`,borderRadius:8,background:C.white}}>
         <table style={{width:"100%",borderCollapse:"collapse",minWidth:760}}>
           <thead><tr>{["Part","Policy","Preferred supplier","Lead","MOQ / pack","Service","Usage / mo",""].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>

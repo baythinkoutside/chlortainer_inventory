@@ -37,6 +37,7 @@ function labelHtml(p, size, opts) {
   const desc = esc(p.description);
   const meta = [`UOM: ${esc(p.uom || "EA")}`];
   if (opts.showMin && +p.minStock > 0) meta.push(`Min: ${+p.minStock}`);
+  if (p.legacy_part_no) meta.push(`Old #${esc(p.legacy_part_no)}`);
   if (opts.showLoc && p.location) meta.push(`<b class="loc">Bin ${esc(p.location)}</b>`);
 
   if (!size.full) {
@@ -175,7 +176,7 @@ export default function BinLabelsTab({ parts, ui }) {
   const cats = useMemo(() => [...new Set(parts.map((p) => p.category).filter(Boolean))].sort(), [parts]);
   const shown = sorted.filter((p) =>
     (!cat || p.category === cat) &&
-    (!q || `${p.id} ${p.description}`.toLowerCase().includes(q.toLowerCase())));
+    (!q || `${p.id} ${p.new_part_no || ""} ${p.legacy_part_no || ""} ${p.description}`.toLowerCase().includes(q.toLowerCase())));
 
   const toggle = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const selectShown = () => setSel((s) => { const n = new Set(s); shown.forEach((p) => n.add(p.id)); return n; });
