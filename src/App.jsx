@@ -1095,8 +1095,10 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
 const escHtml = (v) => String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function printShelfTags(list) {
   if (!list.length) return;
-  const labels = list.map((p,i)=>`
-    <div class="tag">
+  const labels = list.map((p,i)=>{
+    const k=i%10, left=(0.156+(k%2)*4.188).toFixed(3), top=(0.5+Math.floor(k/2)*2).toFixed(3);
+    return `
+    <div class="tag" style="left:${left}in;top:${top}in">
       <div class="top">
         ${p.image_url?`<img class="thumb" src="${escHtml(p.image_url)}" alt=""/>`:`<div class="thumb ph"></div>`}
         <div class="txt">
@@ -1109,21 +1111,22 @@ function printShelfTags(list) {
         <div class="qr" data-qr="${escHtml(p.id)}"></div>
         <div class="bcwrap"><svg class="bc" data-bc="${escHtml(p.id)}"></svg><div class="bctxt">${escHtml(p.id)}</div></div>
       </div>
-    </div>`);
+    </div>`;});
   const sheets = [];
   for (let i=0;i<labels.length;i+=10) sheets.push(`<div class="sheet">${labels.slice(i,i+10).join("")}</div>`);
   const w = window.open("","_blank");
   if (!w) { alert("Pop-up blocked. Allow pop-ups for this site to print tags."); return; }
-  w.document.write(`<!DOCTYPE html><html><head><title>Shelf Tags</title>
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=816"/><title>Shelf Tags</title>
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"><\/script>
     <style>
       @page { size: letter; margin: 0; }
       * { box-sizing: border-box; }
       body { margin: 0; font-family: Arial, sans-serif; color: #1C2B3A; }
-      .sheet { width: 8.5in; height: 11in; padding: 0.5in 0.156in 0; display: grid;
-               grid-template-columns: 4in 4in; column-gap: 0.188in; grid-auto-rows: 2in; page-break-after: always; }
-      .tag { width: 4in; height: 2in; padding: 0.09in 0.14in; border: 0.5pt dashed #ccc; overflow: hidden; }
+      html, body { width: 8.5in; }
+      .sheet { position: relative; width: 8.5in; height: 10.99in; overflow: hidden; break-after: page; page-break-after: always; }
+      .sheet:last-child { break-after: auto; page-break-after: auto; }
+      .tag { position: absolute; width: 4in; height: 2in; padding: 0.09in 0.14in; border: 0.5pt dashed #ccc; overflow: hidden; }
       .top { display: flex; gap: 0.12in; height: 0.92in; align-items: center; padding-bottom: 0.05in; border-bottom: 1.5pt solid #1C2B3A; }
       .thumb { width: 0.82in; height: 0.82in; object-fit: contain; flex-shrink: 0; border: 1pt solid #1C2B3A; border-radius: 6px; }
       .ph { border: 1pt dashed #999; }
