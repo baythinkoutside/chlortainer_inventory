@@ -833,15 +833,37 @@ function CameraScanner({ onScan, onClose, hint="" }) {
 // Primary id = "CT-" + new part number (e.g. CT-5100). The old number is kept as legacy_part_no.
 // Parts still waiting for a new number keep CT-<old number> and show a Pending flag (old CT-BC-#### labels still scan).
 const PART_PREFIX = "CT-";
-function findPartByCode(parts, raw){
+function findPartsByCode(parts, raw){
   const t=(raw||"").trim().toUpperCase();
-  if(!t) return null;
-  let p=parts.find(x=>x.id.toUpperCase()===t);
-  if(p) return p;
-  p=parts.find(x=>x.new_part_no&&String(x.new_part_no).toUpperCase()===t);
-  if(p) return p;
-  const leg=parts.filter(x=>x.legacy_part_no&&(String(x.legacy_part_no).toUpperCase()===t||`CT-${x.legacy_part_no}`.toUpperCase()===t||`CT-BC-${x.legacy_part_no}`.toUpperCase()===t));
-  return leg.length===1?leg[0]:null;
+  if(!t) return [];
+  const exact=parts.find(x=>x.id.toUpperCase()===t);
+  if(exact) return [exact];
+  const out=[];
+  const add=p=>{ if(!out.includes(p)) out.push(p); };
+  parts.filter(x=>x.new_part_no&&String(x.new_part_no).toUpperCase()===t).forEach(add);
+  parts.filter(x=>x.legacy_part_no&&(String(x.legacy_part_no).toUpperCase()===t||`CT-${x.legacy_part_no}`.toUpperCase()===t||`CT-BC-${x.legacy_part_no}`.toUpperCase()===t)).forEach(add);
+  return out;
+}
+function findPartByCode(parts, raw){
+  const r=findPartsByCode(parts,raw);
+  return r.length===1?r[0]:null;
+}
+function matchKind(p, raw){
+  const t=(raw||"").trim().toUpperCase().replace(/^CT-(BC-)?/,"");
+  if(p.new_part_no&&String(p.new_part_no).toUpperCase()===t) return "matches NEW #";
+  if(p.legacy_part_no&&String(p.legacy_part_no).toUpperCase()===t) return "matches OLD #";
+  return "";
+}
+function PartChooser({ code, choices, onPick, onCancel }){
+  return <div style={{background:"#fffbeb",border:"1px solid #f59e0b",borderRadius:8,padding:"12px 14px"}}>
+    <div style={{fontSize:13,fontWeight:700,marginBottom:6}}>⚠ "{code}" matches more than one part. Which one?</div>
+    {choices.map(p=><button key={p.id} onClick={()=>onPick(p)} style={{display:"block",width:"100%",textAlign:"left",marginBottom:6,padding:"8px 10px",border:`1px solid ${C.border}`,borderRadius:6,background:"#fff",cursor:"pointer"}}>
+      <div style={{fontFamily:"monospace",fontWeight:700}}>{p.id} <span style={{fontWeight:400,fontSize:11,color:C.textLight}}>{matchKind(p,code)}</span></div>
+      <div style={{fontSize:12}}>{p.description}</div>
+      <LegacyNote p={p}/>
+    </button>)}
+    <button onClick={onCancel} style={{fontSize:12,background:"none",border:"none",color:C.textLight,cursor:"pointer"}}>Cancel</button>
+  </div>;
 }
 function partMatchesSearch(p, q){
   const s=(q||"").toLowerCase();
@@ -963,16 +985,22 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(""),3000);}
 
+  const [choices,setChoices]=useState(null); // {code, list}
   function handleScan(code){
-    setNotFound("");
+    setNotFound(""); setChoices(null);
     const t=code.trim().toUpperCase();
     setLastScanned(code.trim());
-    // Check CT SKU first, then fall back to product barcode lookup
-    let part=findPartByCode(parts,t);
+    const cands=findPartsByCode(parts,t);
+    if(cands.length>1){ setChoices({code:code.trim(),list:cands}); return; }
+    let part=cands[0]||null;
     if(!part){
       const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===t);
       if(mfgMatch) part=parts.find(p=>p.id===mfgMatch.part_id);
     }
+    applyScan(t,part);
+  }
+  function applyScan(t,part){
+    setChoices(null);
     if(mode==="lookup"||mode==="receive"){
       if(part) setResult({type:"part",data:part});
       else setNotFound(t);
@@ -1080,6 +1108,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
         <CameraScanner onScan={handleScan} onClose={reset} hint="Point at any CT-#### barcode"/>
         <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
         <ManualEntry onSubmit={handleScan}/>
+        {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
       {mode==="lookup"&&result?.type==="part"&&<LookupResult result={result} parts={parts} suppliers={suppliers} onClear={()=>setResult(null)}/>}
@@ -1088,6 +1117,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
         <CameraScanner onScan={handleScan} onClose={reset} hint="Point at the part barcode to receive stock"/>
         <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
         <ManualEntry onSubmit={handleScan}/>
+        {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
       {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
@@ -1109,6 +1139,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
           );})}
         </div>
         <CameraScanner onScan={handleScan} onClose={reset} hint="Scan parts to add to shipment"/>
+        {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
         {shipItems.length>0&&<div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,display:"grid",gap:12}}>
           <SectionTitle>Shipment Details</SectionTitle>
@@ -1936,13 +1967,19 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
   function resolvePart(code){
     const c=(code||"").trim();
     if(!c) return null;
-    const direct=findPartByCode(parts,c);
-    if(direct) return direct.id;
+    const cands=findPartsByCode(parts,c);
+    if(cands.length===1) return cands[0].id;
+    if(cands.length>1){
+      const onLp=cands.filter(p=>items.find(i=>i.partId===p.id));
+      if(onLp.length===1) return onLp[0].id;
+      return {ambiguous:cands};
+    }
     const mb=(mfgBarcodes||[]).find(b=>(b.barcode||"").trim()===c);
     return mb?mb.part_id:null;
   }
   async function pick(code, qty=scanQty){
     const partId=resolvePart(code);
+    if(partId&&partId.ambiguous){ setPickMsg({ok:false,text:`"${code}" matches ${partId.ambiguous.map(p=>p.id).join(" and ")}. Scan the full ID instead.`}); return; }
     if(!partId){ setPickMsg({ok:false,text:`Unknown barcode "${code}".`}); return; }
     if(!items.find(i=>i.partId===partId)){ setPickMsg({ok:false,text:`${partId} is not on this license plate. Nothing changed.`}); return; }
     try{
