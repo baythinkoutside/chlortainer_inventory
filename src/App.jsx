@@ -409,9 +409,51 @@ function useData() {
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
-    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null,customer_id:form.customer_id||null});
+    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null,customer_id:form.customer_id||null,order_id:form.order_id||null});
     await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
+  }
+  // ── Build a shipment LP from an order: control list x units (manufacturing) or its part/kit lines (maintenance) ──
+  function buildOrderLpItems(order){
+    const map=new Map(); const skipped=[];
+    const add=(partId,qty,list)=>{
+      const p=parts.find(x=>x.id===partId);
+      if(!p){ skipped.push(partId); return; }
+      const q=Math.ceil((+qty)||0); if(q<=0) return;
+      const key=`${list}|${partId}`;
+      if(map.has(key)){ map.get(key).qty+=q; return; }
+      const links=p.suppliers||[];
+      const direct=links.length>0&&links.every(x=>x.shipsDirect);
+      const it={partId,qty:q,picked:0,list,box:"",source:direct?"direct":"warehouse"};
+      if(direct){
+        const sup=suppliers.find(x=>x.id===links[0].supplierId);
+        it.supplier=sup?.name||links[0].supplierId; it.direct_status="To order";
+      }
+      map.set(key,it);
+    };
+    if((order.order_type||"manufacturing")==="maintenance"){
+      maintLines.filter(l=>l.order_id===order.id&&l.status!=="Cancelled").forEach(l=>{
+        if(l.line_type==="part") add(l.part_id,l.qty,"Maintenance Parts");
+        else kitLines.filter(k=>k.kit_id===l.kit_id).forEach(k=>add(k.part_id,k.qty*(+l.qty||1),maintKits.find(m=>m.id===l.kit_id)?.name||"Kit"));
+      });
+    } else {
+      orderLines.filter(l=>l.order_id===order.id&&l.status!=="Cancelled").forEach(l=>{
+        controlLines.filter(c=>c.vessel_model_id===l.vessel_model_id).forEach(c=>add(c.part_id,(+c.qty_per_unit)*(+l.units||1),c.list_type));
+      });
+    }
+    const order_of=t=>{const i=packingSlipTypes.findIndex(x=>x.name===t);return i<0?99:i;};
+    const items=[...map.values()].sort((a,b)=>order_of(a.list)-order_of(b.list)||(a.source==="direct")-(b.source==="direct")||a.partId.localeCompare(b.partId));
+    return {items,skipped};
+  }
+  async function createLpFromOrder(orderId){
+    const order=orders.find(o=>o.id===orderId);
+    if(!order) throw new Error("Order not found.");
+    const {items,skipped}=buildOrderLpItems(order);
+    if(items.length===0) throw new Error("Nothing to load: this order has no control-list lines (or no vessel/part lines yet).");
+    const cust=customers.find(c=>c.id===order.customer_id);
+    const id=await createLP({type:"Outbound",destination:[cust?.name,order.project_name].filter(Boolean).join(" - ")||order.id,status:"Pending",quote_number:order.quote_number,po_number:order.po_number,customer_id:order.customer_id,order_id:order.id},items);
+    await fetchAll();
+    return {id,lines:items.length,direct:items.filter(i=>i.source==="direct").length,skipped};
   }
   // ── Picking into a license plate (shipping container) ─────────────────────
   // A pick removes stock from the TGO warehouse immediately. Stock is drawn from the
@@ -698,7 +740,7 @@ function useData() {
 
   return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
-    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine}};
@@ -2616,7 +2658,30 @@ function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions })
   </div>;
 }
 
-function OrderDetailModal({ order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
+function OrderLpPanel({ order, lps, actions, disabled }) {
+  const [busy,run]=useRun();
+  const [msg,setMsg]=useState(null);
+  const mine=lps.filter(l=>l.order_id===order.id);
+  async function create(){
+    if(mine.length>0&&!window.confirm(`This order already has ${mine.length} license plate${mine.length>1?"s":""} (${mine.map(l=>l.id).join(", ")}).\n\nCreate another one?`)) return;
+    try{
+      const r=await actions.createLpFromOrder(order.id);
+      setMsg({ok:true,text:`Created ${r.id}: ${r.lines} lines${r.direct?` (${r.direct} ship direct from supplier)`:""}.${r.skipped.length?` Skipped unknown parts: ${[...new Set(r.skipped)].join(", ")}.`:""} Open it from the License Plates tab to review, add boxes and start picking.`});
+    }catch(e){ setMsg({ok:false,text:e.message||String(e)}); }
+  }
+  return <div style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,background:C.white}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <div>
+        <div style={{fontWeight:800,fontSize:13,color:C.navy}}>Shipment license plate</div>
+        <div style={{fontSize:12,color:C.textLight}}>{mine.length>0?mine.map(l=>`${l.id} (${l.status})`).join(" · "):"None yet. Loads every part from the control list(s) for this order's vessels and units."}</div>
+      </div>
+      <Btn disabled={busy||disabled} onClick={()=>run(create)}>{mine.length>0?"Create another LP":"Create LP from order"}</Btn>
+    </div>
+    {msg&&<div style={{marginTop:8,fontSize:12,fontWeight:600,color:msg.ok?C.greenText:C.red}}>{msg.text}</div>}
+  </div>;
+}
+
+function OrderDetailModal({ lps, order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
   const [f,setF]=useState({customer_id:order.customer_id||"",quote_number:order.quote_number||"",po_number:order.po_number||"",project_name:order.project_name||"",notes:order.notes||"",status:order.status||"Open"});
   const [busy,run]=useRun();
   const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
@@ -2642,6 +2707,7 @@ function OrderDetailModal({ order, customers, orderLines, maintLines, vesselMode
           <Btn disabled={!dirty||busy} onClick={()=>run(()=>actions.updateOrder(order.id,{customer_id:f.customer_id||null,quote_number:f.quote_number||null,po_number:f.po_number||null,project_name:f.project_name||null,notes:f.notes||null,status:f.status}))}>{busy?"Saving…":"Save order"}</Btn>
         </div>
       </div>
+      <OrderLpPanel order={order} lps={lps||[]} actions={actions} disabled={(order.status||"Open")!=="Open"}/>
       <SectionTitle>{isMaint?"Purchase order lines":"Vessels on this order"}</SectionTitle>
       {isMaint
         ? <MaintenanceLines order={order} lines={maintLines.filter(l=>l.order_id===order.id)} parts={parts} maintKits={maintKits} kitLines={kitLines} actions={actions}/>
@@ -2650,7 +2716,7 @@ function OrderDetailModal({ order, customers, orderLines, maintLines, vesselMode
   </Modal>;
 }
 
-function OrdersTab({ orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
+function OrdersTab({ lps, orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
   const [typeFilter,setTypeFilter]=useState("all");
   const [search,setSearch]=useState("");
   const [showNew,setShowNew]=useState(false);
@@ -2698,7 +2764,7 @@ function OrdersTab({ orders, orderLines, maintLines, customers, vesselModels, co
       {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No orders yet. Create one to start planning demand.</div>}
     </div>
     {showNew&&<NewOrderModal customers={customers} actions={actions} onClose={()=>setShowNew(false)} onCreated={id=>{setShowNew(false);setOpenId(id);}}/>}
-    {open&&<OrderDetailModal order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
+    {open&&<OrderDetailModal lps={lps} order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
   </div>;
 }
 
@@ -3153,7 +3219,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
-          :tab==="orders"?<OrdersTab orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
+          :tab==="orders"?<OrdersTab lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
           :tab==="pos"?<PurchaseOrdersTab purchaseOrders={purchaseOrders} poLines={poLines} suppliers={suppliers} parts={parts} actions={actions}/>
