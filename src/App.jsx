@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useMemo, useId } from "react";
 import { forecast, FIRM_STATUSES } from "./replenishment.js";
 import BinLabelsTab from "./BinLabels.jsx";
+import { parseSlip, guessListType, matchPart } from "./slipParser.js";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
 const STORAGE_KEY = "chlortainer_sb_config";
@@ -286,6 +287,7 @@ function useData() {
   const [controlLines,setControlLines]=useState([]);
   const [orders,setOrders]=useState([]);
   const [orderLines,setOrderLines]=useState([]);
+  const [packingLines,setPackingLines]=useState([]);
   const [maintKits,setMaintKits]=useState([]);
   const [kitLines,setKitLines]=useState([]);
   const [maintLines,setMaintLines]=useState([]);
@@ -331,6 +333,7 @@ function useData() {
     setControlLines(cls||[]);
     setOrders(ords||[]);
     setOrderLines(ols||[]);
+    { const {data:opl}=await sb.from("order_packing_lines").select("*").order("created_at"); setPackingLines(opl||[]); }
     setMaintKits(kits||[]);
     setKitLines(kls||[]);
     setMaintLines(mls||[]);
@@ -413,6 +416,19 @@ function useData() {
     await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
   }
+  // ── Packing lists loaded from QuickBooks slips (the source for an order's LP) ──
+  async function savePackingList(orderId, listType, lines, meta={}){
+    await dbRun(_sb.from("order_packing_lines").delete().eq("order_id",orderId).eq("list_type",listType));
+    const rows=lines.map(l=>({order_id:orderId,list_type:listType,part_id:l.partId,qty:+l.qty,printed_no:l.no||null,printed_desc:l.desc||null,slip_date:meta.slipDate||null,source_file:meta.file||null}));
+    if(rows.length) await dbRun(_sb.from("order_packing_lines").insert(rows));
+    await logAudit("packing_list_load","order",orderId,{list_type:listType,lines:rows.length,file:meta.file,slip_date:meta.slipDate});
+    await fetchAll();
+  }
+  async function deletePackingList(orderId, listType){
+    await dbRun(_sb.from("order_packing_lines").delete().eq("order_id",orderId).eq("list_type",listType));
+    await logAudit("packing_list_delete","order",orderId,{list_type:listType});
+    await fetchAll();
+  }
   // ── Build a shipment LP from an order: control list x units (manufacturing) or its part/kit lines (maintenance) ──
   function buildOrderLpItems(order){
     const map=new Map(); const skipped=[];
@@ -431,7 +447,10 @@ function useData() {
       }
       map.set(key,it);
     };
-    if((order.order_type||"manufacturing")==="maintenance"){
+    const pl=packingLines.filter(l=>l.order_id===order.id);
+    if(pl.length>0){
+      pl.forEach(l=>add(l.part_id,l.qty,l.list_type));
+    } else if((order.order_type||"manufacturing")==="maintenance"){
       maintLines.filter(l=>l.order_id===order.id&&l.status!=="Cancelled").forEach(l=>{
         if(l.line_type==="part") add(l.part_id,l.qty,"Maintenance Parts");
         else kitLines.filter(k=>k.kit_id===l.kit_id).forEach(k=>add(k.part_id,k.qty*(+l.qty||1),maintKits.find(m=>m.id===l.kit_id)?.name||"Kit"));
@@ -443,17 +462,17 @@ function useData() {
     }
     const order_of=t=>{const i=packingSlipTypes.findIndex(x=>x.name===t);return i<0?99:i;};
     const items=[...map.values()].sort((a,b)=>order_of(a.list)-order_of(b.list)||(a.source==="direct")-(b.source==="direct")||a.partId.localeCompare(b.partId));
-    return {items,skipped};
+    return {items,skipped,fromPacking:pl.length>0};
   }
   async function createLpFromOrder(orderId){
     const order=orders.find(o=>o.id===orderId);
     if(!order) throw new Error("Order not found.");
-    const {items,skipped}=buildOrderLpItems(order);
+    const {items,skipped,fromPacking}=buildOrderLpItems(order);
     if(items.length===0) throw new Error("Nothing to load: this order has no control-list lines (or no vessel/part lines yet).");
     const cust=customers.find(c=>c.id===order.customer_id);
     const id=await createLP({type:"Outbound",destination:[cust?.name,order.project_name].filter(Boolean).join(" - ")||order.id,status:"Pending",quote_number:order.quote_number,po_number:order.po_number,customer_id:order.customer_id,order_id:order.id},items);
     await fetchAll();
-    return {id,lines:items.length,direct:items.filter(i=>i.source==="direct").length,skipped};
+    return {id,lines:items.length,direct:items.filter(i=>i.source==="direct").length,skipped,fromPacking};
   }
   // ── Picking into a license plate (shipping container) ─────────────────────
   // A pick removes stock from the TGO warehouse immediately. Stock is drawn from the
@@ -739,8 +758,8 @@ function useData() {
   }
 
   return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
-    vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
-    loading,error,actions:{addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+    vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
+    loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine}};
@@ -2658,7 +2677,125 @@ function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions })
   </div>;
 }
 
-function OrderLpPanel({ order, lps, actions, disabled }) {
+async function readSlipPdf(file){
+  const pdfjs=await import("pdfjs-dist");
+  pdfjs.GlobalWorkerOptions.workerSrc=(await import("pdfjs-dist/build/pdf.worker.min.mjs?url")).default;
+  const doc=await pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
+  const items=[];
+  for(let p=1;p<=doc.numPages;p++){
+    const tc=await (await doc.getPage(p)).getTextContent();
+    tc.items.forEach(i=>{ if(i.transform&&typeof i.str==="string") items.push({str:i.str,x:i.transform[4],y:i.transform[5],page:p}); });
+  }
+  return parseSlip(items);
+}
+
+function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actions }) {
+  const [busy,run]=useRun();
+  const [slips,setSlips]=useState(null);     // review state: [{file,title,quote,slipDate,po,listType,error,lines:[...]}]
+  const [reading,setReading]=useState(false);
+  const [msg,setMsg]=useState(null);
+  const mine=packingLines.filter(l=>l.order_id===order.id);
+  const listNames=packingSlipTypes.map(t=>t.name);
+  const groups=listNames.map(n=>({n,rows:mine.filter(l=>l.list_type===n)})).filter(g=>g.rows.length>0)
+    .concat([...new Set(mine.map(l=>l.list_type))].filter(n=>!listNames.includes(n)).map(n=>({n,rows:mine.filter(l=>l.list_type===n)})));
+
+  async function onFiles(e){
+    const files=[...(e.target.files||[])]; e.target.value="";
+    if(!files.length) return;
+    setReading(true); setMsg(null);
+    const out=[];
+    for(const f of files){
+      try{
+        const r=await readSlipPdf(f);
+        if(r.error){ out.push({file:f.name,error:r.error,lines:[]}); continue; }
+        out.push({file:f.name,title:r.title,quote:r.quote,slipDate:r.slipDate,po:r.po,listType:guessListType(r.title,listNames),
+          lines:r.lines.map((l,k)=>{
+            const m=matchPart(parts,l.no,l.desc);
+            const flags=[...m.flags]; if(l.qty==null) flags.push("No quantity found. Type it in, or skip the line.");
+            return {id:k,no:l.no,desc:l.desc,qty:l.qty==null?"":String(l.qty),partId:m.pick?.id||"",candidates:m.candidates.map(c=>c.part.id),flags,include:true};
+          })});
+      }catch(err){ out.push({file:f.name,error:"Could not read this file: "+(err.message||err),lines:[]}); }
+    }
+    setReading(false); setSlips(out);
+  }
+  const upd=(si,fn)=>setSlips(prev=>prev.map((s,i)=>i===si?fn(s):s));
+  const updLine=(si,li,ch)=>upd(si,s=>({...s,lines:s.lines.map((l,k)=>k===li?{...l,...ch}:l)}));
+
+  const problems=(slips||[]).flatMap((s,si)=>{
+    if(s.error) return [];
+    const p=[];
+    if(!s.listType) p.push(`${s.file}: choose the packing list type.`);
+    if((slips||[]).findIndex(x=>!x.error&&x.listType===s.listType)!==si&&s.listType) p.push(`${s.file}: another file in this upload is also "${s.listType}". Load one at a time.`);
+    s.lines.filter(l=>l.include).forEach(l=>{ if(!l.partId) p.push(`${s.file}: ${l.no} needs a part.`); if(!(+l.qty>0)) p.push(`${s.file}: ${l.no} needs a quantity above 0.`); });
+    if(s.lines.filter(l=>l.include).length===0) p.push(`${s.file}: no lines selected.`);
+    return p;
+  });
+  const goodSlips=(slips||[]).filter(s=>!s.error);
+
+  async function saveAll(){
+    for(const s of goodSlips){
+      const had=mine.some(l=>l.list_type===s.listType);
+      if(had&&!window.confirm(`"${s.listType}" is already loaded for this order. Replace it with ${s.file}?`)) continue;
+      await actions.savePackingList(order.id,s.listType,s.lines.filter(l=>l.include),{slipDate:(()=>{const m=(s.slipDate||"").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?`${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`:null;})(),file:s.file});
+    }
+    setMsg({ok:true,text:`Loaded ${goodSlips.length} packing list${goodSlips.length>1?"s":""}.`}); setSlips(null);
+  }
+  const sel={fontSize:12,padding:"4px 6px",border:`1px solid ${C.border}`,borderRadius:4,maxWidth:"100%"};
+  return <div style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,background:C.white}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <div>
+        <div style={{fontWeight:800,fontSize:13,color:C.navy}}>Packing lists</div>
+        <div style={{fontSize:12,color:C.textLight}}>{mine.length===0?"None loaded. Upload the QuickBooks packing slip PDFs (Main, Loose, Spare). The LP is built from them.":`${groups.length} loaded · ${mine.length} lines`}</div>
+      </div>
+      <label style={{display:"inline-block",padding:"7px 14px",borderRadius:6,background:C.navy,color:"#fff",fontSize:13,fontWeight:700,cursor:reading?"wait":"pointer"}}>
+        {reading?"Reading…":"Upload slip PDF(s)"}<input type="file" accept="application/pdf,.pdf" multiple disabled={reading} onChange={onFiles} style={{display:"none"}}/>
+      </label>
+    </div>
+    {groups.map(g=><div key={g.n} style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8,fontSize:12,borderTop:`1px solid ${C.border}`,paddingTop:6}}>
+      <span><b>{g.n}</b> · {g.rows.length} lines{g.rows[0].slip_date?` · slip ${fmtDate(g.rows[0].slip_date)}`:""}{g.rows[0].source_file?` · ${g.rows[0].source_file}`:""}</span>
+      <button disabled={busy} onClick={()=>{if(window.confirm(`Remove the ${g.n} packing list from this order?`))run(()=>actions.deletePackingList(order.id,g.n));}} style={{border:`1px solid ${C.redBorder}`,background:C.white,color:C.red,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>Remove</button>
+    </div>)}
+    {msg&&<div style={{marginTop:8,fontSize:12,fontWeight:600,color:msg.ok?C.greenText:C.red}}>{msg.text}</div>}
+    {slips&&<Modal title="Review packing lists before loading" onClose={()=>setSlips(null)}>
+      <div style={{display:"grid",gap:14}}>
+        <div style={{fontSize:12,color:C.textMid}}>Check each line. Amber lines need a look. Nothing is saved until you press Load. Slips may print the old or the new part number; the match uses both plus the description.</div>
+        {slips.map((s,si)=>s.error
+          ?<div key={si} style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:10,fontSize:12,color:C.red}}><b>{s.file}</b><br/>{s.error}</div>
+          :<div key={si} style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:10}}>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginBottom:8}}>
+              <b style={{fontSize:13}}>{s.title||s.file}</b>
+              <span style={{fontSize:11,color:C.textLight}}>{s.file}</span>
+              <span style={{fontSize:11,color:C.textMid}}>Quote {s.quote||"?"}{s.slipDate?` · ${s.slipDate}`:""}{s.po?` · PO ${s.po}`:""}</span>
+              <select value={s.listType} onChange={e=>upd(si,x=>({...x,listType:e.target.value}))} style={sel}><option value="">Packing list type…</option>{listNames.map(n=><option key={n}>{n}</option>)}</select>
+            </div>
+            {order.quote_number&&s.quote&&order.quote_number!==s.quote&&<div style={{fontSize:12,color:C.amber,fontWeight:700,marginBottom:6}}>⚠ Slip quote number {s.quote} does not match this order ({order.quote_number}).</div>}
+            {s.lines.map((l,li)=>{
+              const cands=l.candidates.map(id=>parts.find(p=>p.id===id)).filter(Boolean);
+              const rest=parts.filter(p=>!l.candidates.includes(p.id));
+              const warn=l.flags.length>0;
+              return <div key={l.id} style={{display:"grid",gridTemplateColumns:"24px minmax(0,1.2fr) 64px minmax(0,1.4fr)",gap:8,alignItems:"start",padding:"6px 4px",borderTop:`1px solid ${C.border}`,background:!l.include?"#f4f4f4":warn?"#FFF8E6":"transparent",opacity:l.include?1:.6}}>
+                <input type="checkbox" checked={l.include} onChange={e=>updLine(si,li,{include:e.target.checked})} style={{marginTop:4}}/>
+                <div style={{fontSize:12}}><b style={{fontFamily:"monospace"}}>{l.no}</b> {l.desc}{l.flags.map((f,k)=><div key={k} style={{color:C.amber,fontWeight:700,fontSize:11}}>⚠ {f}</div>)}</div>
+                <input type="number" min="0" value={l.qty} onChange={e=>updLine(si,li,{qty:e.target.value})} style={{...sel,width:60,fontFamily:"monospace"}}/>
+                <select value={l.partId} onChange={e=>updLine(si,li,{partId:e.target.value})} style={sel}>
+                  <option value="">Choose part…</option>
+                  {cands.length>0&&<optgroup label="Suggested">{cands.map(p=><option key={p.id} value={p.id}>{p.id} · {p.description}</option>)}</optgroup>}
+                  <optgroup label="All parts">{rest.map(p=><option key={p.id} value={p.id}>{p.id} · {p.description}</option>)}</optgroup>
+                </select>
+              </div>;
+            })}
+          </div>)}
+        {problems.length>0&&<div style={{fontSize:12,color:C.red}}>{problems.slice(0,6).map((p,i)=><div key={i}>• {p}</div>)}{problems.length>6&&<div>…and {problems.length-6} more</div>}</div>}
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          <Btn variant="outline" onClick={()=>setSlips(null)}>Cancel</Btn>
+          <Btn disabled={busy||goodSlips.length===0||problems.length>0} onClick={()=>run(saveAll)}>Load {goodSlips.length} packing list{goodSlips.length===1?"":"s"}</Btn>
+        </div>
+      </div>
+    </Modal>}
+  </div>;
+}
+
+function OrderLpPanel({ order, lps, actions, disabled, packingCount=0 }) {
   const [busy,run]=useRun();
   const [msg,setMsg]=useState(null);
   const mine=lps.filter(l=>l.order_id===order.id);
@@ -2673,7 +2810,7 @@ function OrderLpPanel({ order, lps, actions, disabled }) {
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
       <div>
         <div style={{fontWeight:800,fontSize:13,color:C.navy}}>Shipment license plate</div>
-        <div style={{fontSize:12,color:C.textLight}}>{mine.length>0?mine.map(l=>`${l.id} (${l.status})`).join(" · "):"None yet. Loads every part from the control list(s) for this order's vessels and units."}</div>
+        <div style={{fontSize:12,color:C.textLight}}>{mine.length>0?mine.map(l=>`${l.id} (${l.status})`).join(" · "):(packingCount>0?"None yet. Will load every line from this order's packing lists.":"None yet. No packing lists loaded, so it will load the control list(s) for this order's vessels and units.")}</div>
       </div>
       <Btn disabled={busy||disabled} onClick={()=>run(create)}>{mine.length>0?"Create another LP":"Create LP from order"}</Btn>
     </div>
@@ -2681,7 +2818,7 @@ function OrderLpPanel({ order, lps, actions, disabled }) {
   </div>;
 }
 
-function OrderDetailModal({ lps, order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
+function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
   const [f,setF]=useState({customer_id:order.customer_id||"",quote_number:order.quote_number||"",po_number:order.po_number||"",project_name:order.project_name||"",notes:order.notes||"",status:order.status||"Open"});
   const [busy,run]=useRun();
   const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
@@ -2707,7 +2844,8 @@ function OrderDetailModal({ lps, order, customers, orderLines, maintLines, vesse
           <Btn disabled={!dirty||busy} onClick={()=>run(()=>actions.updateOrder(order.id,{customer_id:f.customer_id||null,quote_number:f.quote_number||null,po_number:f.po_number||null,project_name:f.project_name||null,notes:f.notes||null,status:f.status}))}>{busy?"Saving…":"Save order"}</Btn>
         </div>
       </div>
-      <OrderLpPanel order={order} lps={lps||[]} actions={actions} disabled={(order.status||"Open")!=="Open"}/>
+      <OrderPackingPanel order={order} packingLines={packingLines||[]} parts={parts} packingSlipTypes={packingSlipTypes||[]} actions={actions}/>
+      <OrderLpPanel order={order} lps={lps||[]} actions={actions} packingCount={(packingLines||[]).filter(l=>l.order_id===order.id).length} disabled={(order.status||"Open")!=="Open"}/>
       <SectionTitle>{isMaint?"Purchase order lines":"Vessels on this order"}</SectionTitle>
       {isMaint
         ? <MaintenanceLines order={order} lines={maintLines.filter(l=>l.order_id===order.id)} parts={parts} maintKits={maintKits} kitLines={kitLines} actions={actions}/>
@@ -2716,7 +2854,7 @@ function OrderDetailModal({ lps, order, customers, orderLines, maintLines, vesse
   </Modal>;
 }
 
-function OrdersTab({ lps, orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
+function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
   const [typeFilter,setTypeFilter]=useState("all");
   const [search,setSearch]=useState("");
   const [showNew,setShowNew]=useState(false);
@@ -2764,7 +2902,7 @@ function OrdersTab({ lps, orders, orderLines, maintLines, customers, vesselModel
       {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No orders yet. Create one to start planning demand.</div>}
     </div>
     {showNew&&<NewOrderModal customers={customers} actions={actions} onClose={()=>setShowNew(false)} onCreated={id=>{setShowNew(false);setOpenId(id);}}/>}
-    {open&&<OrderDetailModal lps={lps} order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
+    {open&&<OrderDetailModal packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
   </div>;
 }
 
@@ -3150,7 +3288,7 @@ function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions 
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
   const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
-    vesselModels,controlLines,orders,orderLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
+    vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
   const [isAdmin,setIsAdmin]=useState(user?.app_metadata?.role==="admin");
@@ -3219,7 +3357,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
           :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
-          :tab==="orders"?<OrdersTab lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
+          :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
           :tab==="pos"?<PurchaseOrdersTab purchaseOrders={purchaseOrders} poLines={poLines} suppliers={suppliers} parts={parts} actions={actions}/>
@@ -3378,7 +3516,7 @@ function AuditLogTab() {
     vessel_model_add:"Vessel Model Added",vessel_model_edit:"Vessel Model Edited",vessel_model_delete:"Vessel Model Deleted",
     control_line_save:"Control List Line",control_line_delete:"Control List Line Removed",
     kit_add:"Kit Added",kit_edit:"Kit Edited",kit_delete:"Kit Deleted",kit_line_save:"Kit Line",kit_line_delete:"Kit Line Removed",
-    list_type_edit:"Pick Time Changed",procurement_save:"Procurement Settings",
+    list_type_edit:"Pick Time Changed",packing_list_load:"Packing List Loaded",packing_list_delete:"Packing List Removed",procurement_save:"Procurement Settings",
     po_create:"PO Created",po_status:"PO Status",po_edit:"PO Edited",po_delete:"PO Deleted",
   };
   const actionColors={

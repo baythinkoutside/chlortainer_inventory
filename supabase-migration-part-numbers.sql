@@ -161,3 +161,6 @@ update parts set new_no_pending = true where new_part_no is null;
 
 -- 2026-11-12: direct-ship + fabricator checklist (applied via migration direct_ship_and_lp_share_checklist)
 --   part_suppliers.ships_direct, license_plates.share_token, RPCs get_lp_by_token / set_lp_line_checked (anon-callable, token-scoped)
+
+-- 2026-11-12: packing lists loaded from QBO slips (applied via migration order_packing_lines)
+--   order_packing_lines(order_id, list_type, part_id, qty, printed_no, printed_desc, slip_date, source_file); RLS: authenticated only.
