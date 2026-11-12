@@ -283,6 +283,7 @@ function useData() {
   const [supplierStock,setSupplierStock]=useState([]);
   const [packingSlipTypes,setPackingSlipTypes]=useState([]);
   const [customers,setCustomers]=useState([]);
+  const [fabricators,setFabricators]=useState([]);
   const [vesselModels,setVesselModels]=useState([]);
   const [controlLines,setControlLines]=useState([]);
   const [orders,setOrders]=useState([]);
@@ -300,7 +301,7 @@ function useData() {
   const fetchAll = async () => {
     const sb = _sb;
     const [{data:sups},{data:rawParts},{data:links},{data:plates},{data:barcodes},{data:supStock},{data:pst},{data:custs},
-           {data:vms},{data:cls},{data:ords},{data:ols},{data:kits},{data:kls},{data:mls},{data:procs},{data:pos},{data:pols}] = await Promise.all([
+           {data:vms},{data:cls},{data:ords},{data:ols},{data:kits},{data:kls},{data:mls},{data:procs},{data:pos},{data:pols},{data:fabs}] = await Promise.all([
       sb.from("suppliers").select("*").order("name"),
       sb.from("parts").select("*").order("id"),
       sb.from("part_suppliers").select("*"),
@@ -319,6 +320,7 @@ function useData() {
       sb.from("part_procurement").select("*"),
       sb.from("purchase_orders").select("*").order("created_at",{ascending:false}),
       sb.from("purchase_order_lines").select("*").order("created_at"),
+      sb.from("fabricators").select("*").order("name"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
       suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost),shipsDirect:!!l.ships_direct}))}));
@@ -329,6 +331,7 @@ function useData() {
     setSupplierStock(supStock||[]);
     setPackingSlipTypes(pst||[]);
     setCustomers(custs||[]);
+    setFabricators(fabs||[]);
     setVesselModels(vms||[]);
     setControlLines(cls||[]);
     setOrders(ords||[]);
@@ -757,7 +760,7 @@ function useData() {
     await fetchAll();
   }
 
-  return {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+  return {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
@@ -1895,7 +1898,7 @@ function InventoryTab({ parts, suppliers }) {
 }
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
-function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, mfgBarcodes, actions }) {
+function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes, mfgBarcodes, actions }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
@@ -1912,6 +1915,8 @@ function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, mfgBarcodes
                 <Badge color={sc(lp.status)}>{lp.status}</Badge>
                 <Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge>
                 {lp.packing_slip_type&&<Badge color="gray">📋 {lp.packing_slip_type}</Badge>}
+                {lp.fabricator_id&&<Badge color="blue">🏭 {fabricators?.find(f=>f.id===lp.fabricator_id)?.name||lp.fabricator_id}</Badge>}
+                {(lp.items||[]).some(i=>i.issue&&!i.issue.resolved_at)&&<Badge color="red">⚠ {(lp.items||[]).filter(i=>i.issue&&!i.issue.resolved_at).length} problem(s)</Badge>}
               </div>
               {(()=>{const c=customers?.find(x=>x.id===lp.customer_id);return c?<div style={{fontSize:13,fontWeight:600,color:C.navy,marginBottom:2}}>🏢 {c.name}</div>:null;})()}
               <div style={{fontSize:13,color:C.textMid}}>→ {lp.destination}</div>
@@ -1931,7 +1936,7 @@ function LicensePlatesTab({ lps, parts, customers, packingSlipTypes, mfgBarcodes
       {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
     </div>
     {showCreate&&<CreateLpModal parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)}/>}
+    {viewLp&&<LpDetailModal fabricators={fabricators} lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)}/>}
   </div>;
 }
 
@@ -2006,7 +2011,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
-function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose }) {
+function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose }) {
   const isPending = lp.status === "Pending";
   const [status,setStatus]=useState(lp.status);
   const [destination,setDestination]=useState(lp.destination||"");
@@ -2035,8 +2040,13 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
   const directOpen=items.filter(it=>isDirect(it)&&!it.checked);
   const checkedCount=items.filter(it=>it.checked).length;
   const hasChecklist=items.some(it=>it.list||it.source);
-  const shareUrl=lp.share_token?`${window.location.origin}/?lp=${lp.share_token}`:"";
-  const [copied,setCopied]=useState(false);
+  const [fabricatorId,setFabricatorId]=useState(lp.fabricator_id||"");
+  async function toggleResolved(i){
+    const who=(getCurrentUser()?.email||"TGO staff");
+    const next=items.map((x,k)=>{ if(k!==i||!x.issue) return x; const {resolved_by,resolved_at,...rest}=x.issue; return {...x,issue:x.issue.resolved_at?rest:{...rest,resolved_by:who,resolved_at:new Date().toISOString()}}; });
+    setItems(next);
+    try{ await actions.updateLP(lp.id,{items:next},{issue_resolve:true}); }catch(e){ setItems(items); setPickMsg({ok:false,text:"Could not save: "+(e.message||e)}); }
+  }
   async function toggleCheck(i){
     const who=(getCurrentUser()?.email||"TGO staff");
     const next=items.map((x,k)=>{ if(k!==i) return x; const {checked,checked_by,checked_at,...rest}=x; return x.checked?rest:{...rest,checked:true,checked_by:who,checked_at:new Date().toISOString()}; });
@@ -2245,10 +2255,16 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
         <SectionTitle>Shipment Contents ({items.length} items · {items.reduce((a,b)=>a+b.qty,0)} total qty)</SectionTitle>
         {hasChecklist&&<div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:"8px 12px",marginBottom:8,fontSize:12}}>
           <div style={{fontWeight:700,color:C.navy}}>Checklist · {checkedCount} of {items.length} checked{directOpen.length>0?` · ${directOpen.length} direct-ship item${directOpen.length>1?"s":""} outstanding`:""}</div>
-          {shareUrl&&<div style={{marginTop:6,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-            <span style={{color:C.textMid}}>Fabricator link (no login):</span>
-            <button onClick={async()=>{try{await navigator.clipboard.writeText(shareUrl);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{window.prompt("Copy this link",shareUrl);}}} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 10px",fontSize:12,cursor:"pointer"}}>{copied?"Copied ✓":"Copy link"}</button>
-          </div>}
+          <div style={{marginTop:6,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{color:C.textMid}}>Fabricator who sees this LP:</span>
+            <select value={fabricatorId} disabled={lp.status==="Cancelled"} onChange={async e=>{
+                const v=e.target.value; setFabricatorId(v);
+                try{ await actions.updateLP(lp.id,{fabricator_id:v||null},{fabricator:v||null}); }catch(x){ setFabricatorId(fabricatorId); setPickMsg({ok:false,text:"Could not assign: "+(x.message||x)}); }
+              }} style={{...inputStyle,padding:"3px 8px",fontSize:12}}>
+              <option value="">— not assigned (staff only) —</option>
+              {(fabricators||[]).filter(f=>f.active||f.id===fabricatorId).map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </div>
         </div>}
         {lp.status==="Shipped"&&shortLines.length>0&&type==="Outbound"&&(
           <div style={{background:"#FFF0F2",border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"8px 12px",marginBottom:8,fontSize:12,color:C.red,fontWeight:700}}>
@@ -2267,6 +2283,11 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
                 {(it.list||it.box)&&<div style={{fontSize:11,color:C.textMid,marginTop:2}}>📋 {it.list}{it.box&&it.box!==it.list?` · ${it.box}`:""}</div>}
                 {isDirect(it)&&<div style={{marginTop:4,fontSize:12,color:C.amber,fontWeight:700}}>🚚 Ships direct from {it.supplier||"supplier"}{it.supplier_po?` · PO ${it.supplier_po}`:""}{it.direct_status?` · ${it.direct_status}`:""} <span style={{fontWeight:400,color:C.textLight}}>(not from TGO stock)</span></div>}
                 {hasChecklist&&<div style={{marginTop:6}}><button onClick={()=>toggleCheck(i)} style={{border:`1.5px solid ${it.checked?"#6FBF8E":C.border}`,background:it.checked?"#F1FAF4":C.white,color:it.checked?C.greenText:C.textMid,borderRadius:5,padding:"3px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{it.checked?"✓ Checked":"☐ Check off"}</button>{it.checked&&it.checked_by&&<span style={{fontSize:11,color:C.textLight,marginLeft:8}}>{it.checked_by}{it.checked_at?` · ${new Date(it.checked_at).toLocaleDateString()}`:""}</span>}</div>}
+                {it.issue&&<div style={{marginTop:6,border:`1px solid ${it.issue.resolved_at?"#6FBF8E":C.redBorder}`,background:it.issue.resolved_at?"#F1FAF4":C.redLight,borderRadius:5,padding:"6px 10px",fontSize:12,color:it.issue.resolved_at?C.greenText:C.red}}>
+                  <b>⚠ {issueLabel(it.issue.type)}</b>{it.issue.note?` — ${it.issue.note}`:""} <span style={{color:C.textLight}}>({it.issue.by}{it.issue.at?`, ${new Date(it.issue.at).toLocaleString()}`:""})</span>
+                  <PhotoThumbs paths={it.issue.photos}/>
+                  <button onClick={()=>toggleResolved(i)} style={{marginTop:6,border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 10px",fontSize:12,cursor:"pointer",color:C.textMid}}>{it.issue.resolved_at?"Reopen":"Mark resolved"}</button>
+                </div>}
                 {!isDirect(it)&&(canPick||pickedOf(it)>0)&&!it.no_stock&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
                   <Badge color={pickedOf(it)>=it.qty?"green":pickedOf(it)>0?"amber":"gray"}>Picked {pickedOf(it)} / {it.qty}</Badge>
                   {canPick&&<>
@@ -3287,7 +3308,7 @@ function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions 
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
-  const {parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+  const {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
   const alerts=parts.filter(p=>p.stock<p.minStock).length;
@@ -3355,7 +3376,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
-          :tab==="lp"?<LicensePlatesTab lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
@@ -3388,7 +3409,9 @@ function UsersTab({ currentUserId }) {
   const [users,setUsers]=useState([]);
   const [loading,setLoading]=useState(true);
   const [email,setEmail]=useState("");
-  const [makeAdmin,setMakeAdmin]=useState(false);
+  const [role,setRole]=useState("staff");
+  const [fabId,setFabId]=useState("");
+  const [fabs,setFabs]=useState([]);
   const [busy,setBusy]=useState(false);
   const [msg,setMsg]=useState(null); // {type:"ok"|"err", text}
 
@@ -3398,17 +3421,27 @@ function UsersTab({ currentUserId }) {
     catch(e){ setMsg({type:"err",text:e.message}); }
     setLoading(false);
   }
-  useEffect(()=>{ load(); },[]);
+  useEffect(()=>{ load(); _sb.from("fabricators").select("*").eq("active",true).order("name").then(({data})=>setFabs(data||[])); },[]);
+  const fabName=id=>fabs.find(f=>f.id===id)?.name||id;
+
+  async function changeRole(u,newRole,newFab){
+    if(newRole==="fabricator"&&!newFab){ setMsg({type:"err",text:"Choose the fabricator company first."}); return; }
+    if(!window.confirm(`Change ${u.email} to ${newRole==="fabricator"?"Fabricator ("+fabName(newFab)+")":newRole==="admin"?"Admin":"Staff"}?`)) return;
+    setBusy(true); setMsg(null);
+    try{ await callManageUsers({action:"set_role",userId:u.id,role:newRole,fabricatorId:newFab||undefined}); await load(); }
+    catch(e){ setMsg({type:"err",text:e.message}); }
+    setBusy(false);
+  }
 
   async function invite(){
     const addr=email.trim().toLowerCase();
     if(!addr) return;
+    if(role==="fabricator"&&!fabId){ setMsg({type:"err",text:"Choose the fabricator company."}); return; }
     setBusy(true); setMsg(null);
     try{
-      const d=await callManageUsers({action:"invite",email:addr,redirectTo:window.location.origin});
-      if(makeAdmin&&d.id) await callManageUsers({action:"set_admin",userId:d.id,isAdmin:true});
+      await callManageUsers({action:"invite",email:addr,role,fabricatorId:role==="fabricator"?fabId:undefined,redirectTo:window.location.origin});
       setMsg({type:"ok",text:`Invitation sent to ${addr}. They'll get an email with a sign-in link.`});
-      setEmail(""); setMakeAdmin(false);
+      setEmail(""); setRole("staff"); setFabId("");
       await load();
     }catch(e){ setMsg({type:"err",text:e.message}); }
     setBusy(false);
@@ -3448,10 +3481,18 @@ function UsersTab({ currentUserId }) {
           </div>
           <Btn variant="navy" onClick={invite} disabled={!email.trim()||busy}>{busy?"Working…":"✉ Send Invite"}</Btn>
         </div>
-        <label style={{display:"flex",alignItems:"center",gap:8,marginTop:12,fontSize:13,color:C.textMid,cursor:"pointer"}}>
-          <input type="checkbox" checked={makeAdmin} onChange={e=>setMakeAdmin(e.target.checked)}/>
-          Also make this user an admin (can add and remove users)
-        </label>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:12,alignItems:"center",fontSize:13,color:C.textMid}}>
+          <span>Access:</span>
+          <select value={role} onChange={e=>setRole(e.target.value)} style={{...inputStyle,padding:"4px 8px"}}>
+            <option value="staff">TGO staff (full app)</option>
+            <option value="admin">Admin (full app + users)</option>
+            <option value="fabricator">Fabricator (checklist only)</option>
+          </select>
+          {role==="fabricator"&&<select value={fabId} onChange={e=>setFabId(e.target.value)} style={{...inputStyle,padding:"4px 8px"}}>
+            <option value="">— company —</option>
+            {fabs.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+          </select>}
+        </div>
         {msg&&<div style={{marginTop:14,borderRadius:6,padding:"10px 14px",fontSize:13,
           background:msg.type==="ok"?C.greenBg:C.redLight,border:`1px solid ${msg.type==="ok"?C.greenBdr:C.redBorder}`,
           color:msg.type==="ok"?C.greenText:C.red}}>{msg.type==="ok"?"✅":"❌"} {msg.text}</div>}
@@ -3470,16 +3511,24 @@ function UsersTab({ currentUserId }) {
                       {u.email} {self&&<span style={{fontSize:11,color:C.textLight,fontWeight:400}}>(you)</span>}
                     </div>
                     <div style={{display:"flex",gap:6,marginTop:6,flexWrap:"wrap",alignItems:"center"}}>
-                      {u.isAdmin&&<Badge color="amber">Admin</Badge>}
+                      {u.role==="admin"&&<Badge color="amber">Admin</Badge>}
+                      {u.role==="fabricator"&&<Badge color="blue">🏭 Fabricator · {fabName(u.fabricatorId)}</Badge>}
                       {u.lastSignInAt
                         ?<span style={{fontSize:11,color:C.textLight}}>Last sign-in {fmt(u.lastSignInAt)}</span>
                         :<Badge color="gray">Invited {fmt(u.invitedAt||u.createdAt)} · not signed in yet</Badge>}
                     </div>
                   </div>
                   {!self&&<div style={{display:"flex",gap:8}}>
-                    <Btn variant="outline" onClick={()=>toggleAdmin(u)} disabled={busy} style={{padding:"6px 12px",fontSize:12}}>
+                    {u.role!=="fabricator"&&<Btn variant="outline" onClick={()=>toggleAdmin(u)} disabled={busy} style={{padding:"6px 12px",fontSize:12}}>
                       {u.isAdmin?"Remove admin":"Make admin"}
-                    </Btn>
+                    </Btn>}
+                    <select value="" disabled={busy} onChange={e=>{ const v=e.target.value; e.target.value=""; if(!v) return;
+                        if(v==="staff"||v==="admin") changeRole(u,v); else changeRole(u,"fabricator",v); }}
+                      style={{...inputStyle,padding:"4px 8px",fontSize:12}}>
+                      <option value="">Change access…</option>
+                      {u.role!=="staff"&&<option value="staff">→ TGO staff</option>}
+                      {fabs.filter(f=>!(u.role==="fabricator"&&u.fabricatorId===f.id)).map(f=><option key={f.id} value={f.id}>→ Fabricator: {f.name}</option>)}
+                    </select>
                     <Btn variant="danger" onClick={()=>remove(u)} disabled={busy} style={{padding:"6px 12px",fontSize:12}}>Remove</Btn>
                   </div>}
                 </div>
@@ -3585,62 +3634,180 @@ function AuditLogTab() {
   );
 }
 
-function FabricatorChecklist({ token }) {
+// ─── Issue flags + photos (shared by fabricator screen and staff LP view) ─────
+const ISSUE_TYPES=[["missing","Missing"],["damaged","Damaged"],["wrong","Wrong item"],["other","Other"]];
+const issueLabel=t=>(ISSUE_TYPES.find(x=>x[0]===t)||[0,"Problem"])[1];
+
+function PhotoThumbs({ paths }) {
+  const [urls,setUrls]=useState([]);
+  const key=(paths||[]).join("|");
+  useEffect(()=>{
+    let dead=false;
+    (async()=>{
+      const out=[];
+      for(const p of (paths||[])){
+        const {data}=await _sb.storage.from("lp-photos").createSignedUrl(p,3600);
+        if(data?.signedUrl) out.push({p,u:data.signedUrl});
+      }
+      if(!dead) setUrls(out);
+    })();
+    return ()=>{dead=true;};
+  },[key]);
+  if(!urls.length) return null;
+  return <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:6}}>
+    {urls.map(x=><a key={x.p} href={x.u} target="_blank" rel="noreferrer"><img src={x.u} alt="issue photo" style={{width:64,height:64,objectFit:"cover",borderRadius:6,border:"1px solid #9DC3E6"}}/></a>)}
+  </div>;
+}
+
+// Shrink a phone photo to ~1280px JPEG before upload
+async function shrinkImage(file){
+  const bmp=await createImageBitmap(file);
+  const s=Math.min(1,1280/Math.max(bmp.width,bmp.height));
+  const cv=document.createElement("canvas"); cv.width=Math.round(bmp.width*s); cv.height=Math.round(bmp.height*s);
+  cv.getContext("2d").drawImage(bmp,0,0,cv.width,cv.height);
+  return await new Promise(res=>cv.toBlob(res,"image/jpeg",0.72));
+}
+
+// ─── Fabricator screen: only LPs assigned to their company ───────────────────
+function FabricatorApp({ user, onSignOut }) {
+  const [list,setList]=useState(null);
+  const [openId,setOpenId]=useState(null);
   const [lp,setLp]=useState(null);
   const [err,setErr]=useState("");
-  const [name,setName]=useState(()=>{try{return localStorage.getItem("ct_fab_name")||"";}catch{return "";}});
   const [busy,setBusy]=useState("");
-  async function load(){
-    try{
-      const cfg=loadConfig(); const sb=await initSB(cfg.url,cfg.key);
-      const {data,error}=await sb.rpc("get_lp_by_token",{p_token:token});
-      if(error) throw error;
-      if(!data) throw new Error("This link is not valid. Ask TGO for a new one.");
-      setLp(data);
-    }catch(e){ setErr(e.message||String(e)); }
+  const [flagFor,setFlagFor]=useState(null); // line being flagged
+  const wrap={maxWidth:640,margin:"0 auto",padding:16,fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
+
+  async function loadList(){
+    const {data,error}=await _sb.rpc("fab_list_lps");
+    if(error){ setErr(error.message); return; }
+    setList(data||[]); setErr("");
   }
-  useEffect(()=>{load();},[]);
+  async function loadLp(id){
+    const {data,error}=await _sb.rpc("fab_get_lp",{p_lp:id});
+    if(error||!data){ setErr(error?.message||"That shipment is not available."); return; }
+    setLp(data); setErr("");
+  }
+  useEffect(()=>{ loadList(); },[]);
+  useEffect(()=>{ if(openId) loadLp(openId); else setLp(null); },[openId]);
+
   async function toggle(it){
-    if(!name.trim()){ window.alert("Please type your name at the top first."); return; }
-    try{localStorage.setItem("ct_fab_name",name.trim());}catch{}
     setBusy(it.key);
-    const {data,error}=await _sb.rpc("set_lp_line_checked",{p_token:token,p_key:it.key,p_checked:!it.checked,p_by:name.trim()});
+    const {data,error}=await _sb.rpc("fab_set_checked",{p_lp:lp.id,p_key:it.key,p_checked:!it.checked});
     setBusy("");
     if(error||!data){ window.alert("Could not save. Check your connection and try again."); return; }
-    await load();
+    await loadLp(lp.id);
   }
-  const wrap={maxWidth:640,margin:"0 auto",padding:16,fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
-  if(err) return <div style={wrap}><h2>ChlorTainer Shipment Checklist</h2><p style={{color:"#b00020"}}>{err}</p></div>;
-  if(!lp) return <div style={wrap}>Loading…</div>;
-  const items=lp.items||[]; const done=items.filter(i=>i.checked).length;
-  const groups=[]; items.forEach(it=>{ const g=(it.list||"Items"); let x=groups.find(a=>a.g===g); if(!x){x={g,rows:[]};groups.push(x);} x.rows.push(it); });
+
+  const top=<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+    <div style={{fontWeight:900,fontSize:18}}>ChlorTainer <span style={{fontSize:11,color:"#a35d00",letterSpacing:1.5}}>FABRICATOR</span></div>
+    <button onClick={onSignOut} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Sign out</button>
+  </div>;
+
+  if(openId&&lp){
+    const items=lp.items||[]; const done=items.filter(i=>i.checked).length;
+    const groups=[]; items.forEach(it=>{ const g=(it.list||"Items"); let x=groups.find(a=>a.g===g); if(!x){x={g,rows:[]};groups.push(x);} x.rows.push(it); });
+    return <div style={wrap}>
+      {top}
+      <button onClick={()=>{setOpenId(null);loadList();}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:14,marginBottom:10}}>← All shipments</button>
+      <h2 style={{margin:"0 0 4px"}}>{lp.id}</h2>
+      <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
+      <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden",marginTop:12}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
+      <div style={{fontSize:14,margin:"6px 0 14px"}}><b>{done}</b> of <b>{items.length}</b> checked</div>
+      {err&&<p style={{color:"#b00020"}}>{err}</p>}
+      {groups.map(g=><div key={g.g} style={{marginBottom:18}}>
+        <div style={{fontWeight:800,fontSize:15,margin:"6px 0",textTransform:"uppercase",letterSpacing:.5}}>{g.g}</div>
+        {g.rows.map(it=>{
+          const open=it.issue&&!it.issue.resolved_at;
+          return <div key={it.key} style={{marginBottom:10,padding:12,border:`2px solid ${open?"#d9534f":it.checked?"#2e9d5b":"#c9d6e2"}`,borderRadius:10,background:open?"#fff5f5":it.checked?"#f1faf4":"#fff"}}>
+            <button onClick={()=>toggle(it)} disabled={busy===it.key} style={{display:"flex",gap:12,alignItems:"flex-start",width:"100%",textAlign:"left",background:"none",border:"none",padding:0,cursor:"pointer",font:"inherit",color:"inherit"}}>
+              <span style={{fontSize:28,lineHeight:"28px"}}>{it.checked?"✅":"⬜"}</span>
+              <span style={{flex:1}}>
+                <span style={{display:"block",fontWeight:700,fontSize:16}}>{it.qty} × {it.description||it.partId}</span>
+                <span style={{display:"block",fontSize:12,color:"#667",fontFamily:"monospace"}}>{it.partId}{it.box&&it.box!==it.list?` · ${it.box}`:""}</span>
+                {it.source==="direct"&&<span style={{display:"block",fontSize:13,color:"#a35d00",marginTop:2}}>🚚 Comes direct from {it.supplier||"the supplier"}{it.supplier_po?` (PO ${it.supplier_po})`:""}. Check it when it arrives.</span>}
+                {it.checked&&it.checked_by&&<span style={{display:"block",fontSize:12,color:"#2e7d4f",marginTop:2}}>Checked by {it.checked_by}</span>}
+              </span>
+            </button>
+            {it.issue&&<div style={{marginTop:8,fontSize:13,color:it.issue.resolved_at?"#2e7d4f":"#b00020"}}>
+              ⚠ {issueLabel(it.issue.type)}{it.issue.note?`: ${it.issue.note}`:""}{it.issue.resolved_at?" — resolved by TGO":""}
+              <PhotoThumbs paths={it.issue.photos}/>
+            </div>}
+            <button onClick={()=>setFlagFor(it)} style={{marginTop:8,padding:"6px 12px",borderRadius:8,border:"1px solid #d9a0a0",background:"#fff",fontSize:13,color:"#b00020"}}>{it.issue?"Edit problem":"⚠ Report a problem"}</button>
+          </div>;
+        })}
+      </div>)}
+      <button onClick={()=>loadLp(lp.id)} style={{padding:"10px 16px",fontSize:15,borderRadius:8,border:"1px solid #9DC3E6",background:"#fff"}}>↻ Refresh</button>
+      {flagFor&&<FlagSheet lpId={lp.id} line={flagFor} onClose={()=>setFlagFor(null)} onSaved={async()=>{setFlagFor(null);await loadLp(lp.id);}}/>}
+    </div>;
+  }
+
   return <div style={wrap}>
-    <h2 style={{margin:"0 0 4px"}}>Shipment Checklist</h2>
-    <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
-    <div style={{margin:"12px 0"}}>
-      <input value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" style={{width:"100%",boxSizing:"border-box",fontSize:18,padding:10,border:"1.5px solid #9DC3E6",borderRadius:8}}/>
-    </div>
-    <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden"}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
-    <div style={{fontSize:14,margin:"6px 0 14px"}}><b>{done}</b> of <b>{items.length}</b> checked</div>
-    {groups.map(g=><div key={g.g} style={{marginBottom:18}}>
-      <div style={{fontWeight:800,fontSize:15,margin:"6px 0",textTransform:"uppercase",letterSpacing:.5}}>{g.g}</div>
-      {g.rows.map(it=><button key={it.key} onClick={()=>toggle(it)} disabled={busy===it.key} style={{display:"flex",gap:12,alignItems:"flex-start",width:"100%",textAlign:"left",marginBottom:8,padding:12,border:`2px solid ${it.checked?"#2e9d5b":"#c9d3dd"}`,background:it.checked?"#f1faf4":"#fff",borderRadius:10,cursor:"pointer",fontFamily:"inherit"}}>
-        <span style={{fontSize:28,lineHeight:"28px"}}>{it.checked?"✅":"⬜"}</span>
-        <span style={{flex:1}}>
-          <span style={{display:"block",fontWeight:700,fontSize:16}}>{it.qty} × {it.description||it.partId}</span>
-          <span style={{display:"block",fontSize:12,color:"#667",fontFamily:"monospace"}}>{it.partId}{it.box&&it.box!==it.list?` · ${it.box}`:""}</span>
-          {it.source==="direct"&&<span style={{display:"block",fontSize:13,color:"#a35d00",marginTop:2}}>🚚 Comes direct from {it.supplier||"the supplier"}{it.supplier_po?` (PO ${it.supplier_po})`:""}. Check when it arrives and is packed with the vessel.</span>}
-          {it.checked&&it.checked_by&&<span style={{display:"block",fontSize:12,color:"#2e7d4f",marginTop:2}}>Checked by {it.checked_by}</span>}
-        </span>
+    {top}
+    <h2 style={{margin:"0 0 10px"}}>Your shipments</h2>
+    {err&&<p style={{color:"#b00020"}}>{err}</p>}
+    {!list?<div>Loading…</div>:list.length===0?<div style={{color:"#667"}}>No shipments are assigned to your company right now.</div>:
+      list.map(l=><button key={l.id} onClick={()=>setOpenId(l.id)} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:"2px solid #c9d6e2",borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit"}}>
+        <div style={{fontWeight:800,fontSize:16}}>{l.id}</div>
+        <div style={{fontSize:13,color:"#445"}}>{l.destination}{l.po_number?` · PO ${l.po_number}`:""}</div>
+        <div style={{fontSize:13,marginTop:4}}><b>{l.checked}</b> of <b>{l.total}</b> checked{l.issues>0?<span style={{color:"#b00020"}}> · ⚠ {l.issues} problem{l.issues>1?"s":""}</span>:null}</div>
       </button>)}
-    </div>)}
-    <button onClick={load} style={{padding:"10px 16px",fontSize:15,borderRadius:8,border:"1px solid #9DC3E6",background:"#fff"}}>↻ Refresh</button>
+    <div style={{fontSize:12,color:"#889",marginTop:16}}>Signed in as {user?.email}</div>
+  </div>;
+}
+
+function FlagSheet({ lpId, line, onClose, onSaved }) {
+  const cur=line.issue||{};
+  const [type,setType]=useState(cur.type||"missing");
+  const [note,setNote]=useState(cur.note||"");
+  const [photos,setPhotos]=useState(cur.photos||[]);
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  async function addPhoto(e){
+    const f=e.target.files?.[0]; e.target.value="";
+    if(!f) return;
+    if(photos.length>=6){ setErr("Up to 6 photos."); return; }
+    setBusy(true); setErr("");
+    try{
+      const blob=await shrinkImage(f);
+      const path=`${lpId}/${Date.now()}-${Math.random().toString(36).slice(2,8)}.jpg`;
+      const {error}=await _sb.storage.from("lp-photos").upload(path,blob,{contentType:"image/jpeg"});
+      if(error) throw error;
+      setPhotos(p=>[...p,path]);
+    }catch(x){ setErr("Photo upload failed: "+(x.message||x)); }
+    setBusy(false);
+  }
+  async function save(clear){
+    setBusy(true); setErr("");
+    const {data,error}=await _sb.rpc("fab_set_issue",{p_lp:lpId,p_key:line.key,p_type:clear?"":type,p_note:clear?"":note,p_photos:clear?[]:photos});
+    setBusy(false);
+    if(error||!data){ setErr(error?.message||"Could not save."); return; }
+    onSaved();
+  }
+  const btn=a=>({padding:"10px 14px",borderRadius:8,border:`2px solid ${a?"#b00020":"#c9d6e2"}`,background:a?"#fff5f5":"#fff",fontSize:15,fontWeight:700});
+  return <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:50}}>
+    <div style={{background:"#fff",width:"100%",maxWidth:640,borderRadius:"14px 14px 0 0",padding:16,maxHeight:"90vh",overflow:"auto"}}>
+      <div style={{fontWeight:800,fontSize:17}}>Report a problem</div>
+      <div style={{fontSize:13,color:"#445",marginBottom:10}}>{line.qty} × {line.description||line.partId}</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>{ISSUE_TYPES.map(([k,l])=><button key={k} onClick={()=>setType(k)} style={btn(type===k)}>{l}</button>)}</div>
+      <textarea value={note} onChange={e=>setNote(e.target.value)} maxLength={500} rows={3} placeholder="What is wrong? (optional)" style={{width:"100%",boxSizing:"border-box",fontSize:16,padding:10,border:"1.5px solid #9DC3E6",borderRadius:8}}/>
+      <PhotoThumbs paths={photos}/>
+      <label style={{display:"inline-block",marginTop:10,padding:"10px 14px",borderRadius:8,border:"1.5px solid #9DC3E6",background:"#eef6ff",fontSize:15,fontWeight:700}}>
+        📷 {busy?"Working…":"Add photo"}
+        <input type="file" accept="image/*" capture="environment" onChange={addPhoto} disabled={busy} style={{display:"none"}}/>
+      </label>
+      {err&&<div style={{color:"#b00020",marginTop:8,fontSize:13}}>{err}</div>}
+      <div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>
+        <button onClick={()=>save(false)} disabled={busy} style={{...btn(true),flex:1}}>Save problem</button>
+        {line.issue&&<button onClick={()=>save(true)} disabled={busy} style={btn(false)}>Clear</button>}
+        <button onClick={onClose} disabled={busy} style={btn(false)}>Cancel</button>
+      </div>
+    </div>
   </div>;
 }
 
 export default function App() {
-  let fabToken=null; try{ fabToken=new URLSearchParams(window.location.search).get("lp"); }catch{}
-  return fabToken ? <FabricatorChecklist token={fabToken}/> : <AppMain/>;
+  return <AppMain/>;
 }
 function AppMain() {
   const [config,setConfig]=useState(()=>loadConfig());
@@ -3680,5 +3847,6 @@ function SupabaseLoader({ config, user, setUser, onDisconnect }) {
   if (err) return <div style={{padding:40,textAlign:"center",color:C.red}}>❌ Failed to connect: {err}<br/><button onClick={onDisconnect} style={{marginTop:16,padding:"8px 16px",cursor:"pointer"}}>Reconnect</button></div>;
   if (!ready) return <Spinner text="Connecting to Supabase…"/>;
   if (!user) return <LoginScreen onLogin={u=>{ setCurrentUser(u); setUser(u); }}/>;
+  if (user?.app_metadata?.role==="fabricator") return <FabricatorApp user={user} onSignOut={handleSignOut}/>;
   return <MainApp user={user} onSignOut={handleSignOut}/>;
 }

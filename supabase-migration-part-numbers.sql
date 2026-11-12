@@ -170,3 +170,14 @@ update parts set new_no_pending = true where new_part_no is null;
 --   anon has no table privileges; rename_part limited to signed-in users with fixed search_path; part-images storage writes need login.
 --   Only get_lp_by_token / set_lp_line_checked remain callable without login (fabricator checklist link).
 --   Previous policies are saved in security_policy_backup_20261112 for rollback.
+
+-- ═══ Fabricator role and limited access (applied 2026-11-12: fabricator_role_and_limited_access) ═══
+-- Roles come from the user's app_metadata: role = 'admin' | 'fabricator' (none = TGO staff).
+-- Fabricators also carry app_metadata.fabricator_id (FAB-JOHANSING, FAB-MCCUTCHEN, FAB-STEEL-STRUCTURES, FAB-AEI).
+-- * Table `fabricators`; column license_plates.fabricator_id (set by staff on the LP).
+-- * RLS: "staff all" policies on every table for signed-in non-fabricators; fabricators have NO table access.
+-- * Fabricators use only these SECURITY DEFINER RPCs, which check the LP belongs to their company:
+--     fab_list_lps(), fab_get_lp(lp), fab_set_checked(lp,key,bool), fab_set_issue(lp,key,type,note,photos)
+-- * Private storage bucket `lp-photos` (path <LP id>/<file>.jpg); fabricators can read/upload only under their own LPs.
+-- * The old no-login share-link functions and license_plates.share_token were dropped.
+-- * Edge function manage-users v2: actions list / invite (role + fabricatorId) / set_role / set_admin / remove.
