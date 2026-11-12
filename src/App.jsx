@@ -319,7 +319,7 @@ function useData() {
       sb.from("purchase_order_lines").select("*").order("created_at"),
     ]);
     const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
-      suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost)}))}));
+      suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost),shipsDirect:!!l.ships_direct}))}));
     setSuppliers(sups||[]);
     setParts(stitched);
     setLps((plates||[]).map(lp=>({...lp,createdAt:lp.created_at,items:lp.items||[]})));
@@ -398,7 +398,7 @@ function useData() {
     await logAudit("supplier_add","supplier",id,{name:form.name});
   }
   async function linkSupplier(partId,form){
-    await _sb.from("part_suppliers").upsert({part_id:partId,supplier_id:form.supplierId,mfg_part_no:form.mfgPartNo,lead_days:+form.leadDays||0,unit_cost:+form.unitCost||0});
+    await _sb.from("part_suppliers").upsert({part_id:partId,supplier_id:form.supplierId,mfg_part_no:form.mfgPartNo,lead_days:+form.leadDays||0,unit_cost:+form.unitCost||0,...(form.shipsDirect!==undefined?{ships_direct:!!form.shipsDirect}:{})});
     await logAudit("supplier_link","part",partId,{supplier_id:form.supplierId,mfg_part_no:form.mfgPartNo});
   }
   async function unlinkSupplier(partId,supplierId){
@@ -482,7 +482,7 @@ function useData() {
   async function releasePicks(lpId, items){
     const out=[];
     for(const it of items||[]){
-      if((it.picked||0)>0) await restoreStock(it.partId,it.picks||[{supplierId:null,qty:it.picked}],lpId,"lp_cancel");
+      if((it.picked||0)>0&&!it.no_stock&&it.source!=="direct") await restoreStock(it.partId,it.picks||[{supplierId:null,qty:it.picked}],lpId,"lp_cancel");
       out.push({...it,picked:0,picks:[]});
     }
     return out;
@@ -1262,7 +1262,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
     setEditStock(false);
   }
 
-  async function addSup(){if(!addSupForm.supplierId||!addSupForm.mfgPartNo)return;setSaving(true);await actions.linkSupplier(live.id,addSupForm);setSaving(false);setAddSupForm({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});}
+  async function addSup(){if(!addSupForm.supplierId||!addSupForm.mfgPartNo)return;setSaving(true);await actions.linkSupplier(live.id,addSupForm);setSaving(false);setAddSupForm({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:"",shipsDirect:false});}
   async function removeSup(sid){setSaving(true);await actions.unlinkSupplier(live.id,sid);setSaving(false);}
   async function addBc(){if(!addBcForm.barcode)return;setSaving(true);try{await actions.addMfgBarcode(live.id,addBcForm.supplierId||null,addBcForm.barcode,addBcForm.description);}catch(e){alert("Barcode already exists: "+addBcForm.barcode);}setSaving(false);setAddBcForm({barcode:"",supplierId:"",description:""});setScanningBc(false);}
   async function deleteBc(id){setSaving(true);await actions.deleteMfgBarcode(id);setSaving(false);}
@@ -1396,7 +1396,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
             <div>
               <div style={{fontWeight:700,fontSize:13,color:C.navy}}>{sup?.name||s.supplierId}</div>
               <div style={{fontFamily:"monospace",fontSize:12,color:C.textMid,marginTop:3}}>{s.mfgPartNo}</div>
-              <div style={{display:"flex",gap:14,marginTop:6}}><span style={{fontSize:11,color:C.textLight}}>⏱ {s.leadDays}d lead</span><span style={{fontSize:11,color:C.greenText,fontWeight:700}}>${(+s.unitCost).toFixed(2)} / {live.uom}</span></div>
+              <div style={{display:"flex",gap:14,marginTop:6}}><span style={{fontSize:11,color:C.textLight}}>⏱ {s.leadDays}d lead</span>{s.shipsDirect&&<Badge color="amber">Ships direct</Badge>}<span style={{fontSize:11,color:C.greenText,fontWeight:700}}>${(+s.unitCost).toFixed(2)} / {live.uom}</span></div>
             </div>
             <Btn variant="danger" style={{padding:"4px 10px",fontSize:11}} disabled={saving} onClick={()=>removeSup(s.supplierId)}>Remove</Btn>
           </div>
@@ -1408,6 +1408,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
             <Input placeholder="Mfg Part No." value={addSupForm.mfgPartNo} onChange={e=>setAddSupForm(f=>({...f,mfgPartNo:e.target.value}))}/>
             <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
               <Input placeholder="Lead days" type="number" value={addSupForm.leadDays} onChange={e=>setAddSupForm(f=>({...f,leadDays:e.target.value}))}/>
+              <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.textMid,gridColumn:"1 / -1"}}><input type="checkbox" checked={!!addSupForm.shipsDirect} onChange={e=>setAddSupForm(f=>({...f,shipsDirect:e.target.checked}))}/> Ships direct from supplier to the fabricator (never held in TGO stock)</label>
               <Input placeholder="Unit cost $" type="number" value={addSupForm.unitCost} onChange={e=>setAddSupForm(f=>({...f,unitCost:e.target.value}))}/>
             </div>
             <Btn disabled={saving} onClick={addSup}>{saving?"Saving…":"Add Supplier Link"}</Btn>
@@ -1962,7 +1963,19 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
   const [scanQty,setScanQty]=useState(1);
   const [pickMsg,setPickMsg]=useState(null);   // {ok:boolean, text:string}
   const pickedOf=it=>it.picked||0;
-  const shortLines=items.filter(it=>pickedOf(it)<it.qty);
+  const isDirect=it=>it.source==="direct";
+  const shortLines=items.filter(it=>!isDirect(it)&&pickedOf(it)<it.qty);
+  const directOpen=items.filter(it=>isDirect(it)&&!it.checked);
+  const checkedCount=items.filter(it=>it.checked).length;
+  const hasChecklist=items.some(it=>it.list||it.source);
+  const shareUrl=lp.share_token?`${window.location.origin}/?lp=${lp.share_token}`:"";
+  const [copied,setCopied]=useState(false);
+  async function toggleCheck(i){
+    const who=(getCurrentUser()?.email||"TGO staff");
+    const next=items.map((x,k)=>{ if(k!==i) return x; const {checked,checked_by,checked_at,...rest}=x; return x.checked?rest:{...rest,checked:true,checked_by:who,checked_at:new Date().toISOString()}; });
+    setItems(next);
+    try{ await actions.updateLP(lp.id,{items:next},{checklist:true}); }catch(e){ setItems(items); setPickMsg({ok:false,text:"Could not save check-off: "+(e.message||e)}); }
+  }
 
   function resolvePart(code){
     const c=(code||"").trim();
@@ -2005,7 +2018,12 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
       if(!window.confirm(`⚠ This license plate is SHORT.\n\n${lines}\n\nShip anyway?`)) return;
       meta={shipped_short:shortLines.map(it=>({partId:it.partId,ordered:it.qty,picked:pickedOf(it),short:it.qty-pickedOf(it)}))};
     }
-    if(status==="Cancelled"&&lp.status!=="Cancelled"&&items.some(it=>pickedOf(it)>0)){
+    if(status==="Shipped"&&lp.status!=="Shipped"&&directOpen.length>0){
+      const lines=directOpen.map(it=>`• ${it.partId} x${it.qty}${it.supplier?` (${it.supplier})`:""}`).join("\n");
+      if(!window.confirm(`⚠ These direct-ship items are not checked off as received/packed:\n\n${lines}\n\nShip anyway?`)) return;
+      meta={...meta,shipped_with_direct_open:directOpen.map(it=>it.partId)};
+    }
+    if(status==="Cancelled"&&lp.status!=="Cancelled"&&items.some(it=>pickedOf(it)>0&&!it.no_stock&&!isDirect(it))){
       if(!window.confirm("Cancel this license plate? Everything picked into it will be returned to inventory.")) return;
     }
     setSaving(true);
@@ -2158,6 +2176,13 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
       {/* Line items — editable when Pending */}
       <div>
         <SectionTitle>Shipment Contents ({items.length} items · {items.reduce((a,b)=>a+b.qty,0)} total qty)</SectionTitle>
+        {hasChecklist&&<div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:"8px 12px",marginBottom:8,fontSize:12}}>
+          <div style={{fontWeight:700,color:C.navy}}>Checklist · {checkedCount} of {items.length} checked{directOpen.length>0?` · ${directOpen.length} direct-ship item${directOpen.length>1?"s":""} outstanding`:""}</div>
+          {shareUrl&&<div style={{marginTop:6,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{color:C.textMid}}>Fabricator link (no login):</span>
+            <button onClick={async()=>{try{await navigator.clipboard.writeText(shareUrl);setCopied(true);setTimeout(()=>setCopied(false),2000);}catch{window.prompt("Copy this link",shareUrl);}}} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 10px",fontSize:12,cursor:"pointer"}}>{copied?"Copied ✓":"Copy link"}</button>
+          </div>}
+        </div>}
         {lp.status==="Shipped"&&shortLines.length>0&&type==="Outbound"&&(
           <div style={{background:"#FFF0F2",border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"8px 12px",marginBottom:8,fontSize:12,color:C.red,fontWeight:700}}>
             ⚠ Shipped short — {shortLines.map(it=>`${it.partId} (${it.qty-pickedOf(it)} short)`).join(", ")}
@@ -2171,8 +2196,11 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
                 {p?.image_url&&<img src={p.image_url} alt={it.partId} style={{width:40,height:40,objectFit:"cover",borderRadius:4,float:"right",marginLeft:8}}/>}
                 <BarcodeDisplay code={it.partId}/>
                 <div style={{fontWeight:700,fontSize:13,color:C.navy,marginTop:4}}>{p?.description||"—"}</div>
-                <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}{p?.location?` · 📍 ${p.location}`:""}</div>
-                {(canPick||pickedOf(it)>0)&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+                <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{p?.category} · {p?.uom}{p?.location&&!isDirect(it)?` · 📍 ${p.location}`:""}</div>
+                {(it.list||it.box)&&<div style={{fontSize:11,color:C.textMid,marginTop:2}}>📋 {it.list}{it.box&&it.box!==it.list?` · ${it.box}`:""}</div>}
+                {isDirect(it)&&<div style={{marginTop:4,fontSize:12,color:C.amber,fontWeight:700}}>🚚 Ships direct from {it.supplier||"supplier"}{it.supplier_po?` · PO ${it.supplier_po}`:""}{it.direct_status?` · ${it.direct_status}`:""} <span style={{fontWeight:400,color:C.textLight}}>(not from TGO stock)</span></div>}
+                {hasChecklist&&<div style={{marginTop:6}}><button onClick={()=>toggleCheck(i)} style={{border:`1.5px solid ${it.checked?"#6FBF8E":C.border}`,background:it.checked?"#F1FAF4":C.white,color:it.checked?C.greenText:C.textMid,borderRadius:5,padding:"3px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{it.checked?"✓ Checked":"☐ Check off"}</button>{it.checked&&it.checked_by&&<span style={{fontSize:11,color:C.textLight,marginLeft:8}}>{it.checked_by}{it.checked_at?` · ${new Date(it.checked_at).toLocaleDateString()}`:""}</span>}</div>}
+                {!isDirect(it)&&(canPick||pickedOf(it)>0)&&!it.no_stock&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
                   <Badge color={pickedOf(it)>=it.qty?"green":pickedOf(it)>0?"amber":"gray"}>Picked {pickedOf(it)} / {it.qty}</Badge>
                   {canPick&&<>
                     <button onClick={()=>pick(it.partId,1)} disabled={pickedOf(it)>=it.qty} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>+1</button>
@@ -2797,11 +2825,12 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
     const open=new Map(purchaseOrders.filter(p=>["Sent","Partially Received"].includes(p.status)).map(p=>[p.id,p]));
     return poLines.filter(l=>open.has(l.po_id)).map(l=>({part_id:l.part_id,qty:l.qty,qty_received:l.qty_received,expected_date:open.get(l.po_id).expected_date||l.needed_by}));
   },[purchaseOrders,poLines]);
+  const directIds=useMemo(()=>new Set(parts.filter(p=>(p.suppliers||[]).length>0&&p.suppliers.every(x=>x.shipsDirect)).map(p=>p.id)),[parts]);
   const result=useMemo(()=>forecast({
-    parts,procurement,supplierLinks,controlLines,listTypes:packingSlipTypes,openPoLines,kitLines,
+    parts,procurement,supplierLinks,controlLines:controlLines.filter(c=>!directIds.has(c.part_id)),listTypes:packingSlipTypes,openPoLines,kitLines,
     orderLines:orderLines.filter(l=>liveOrders.has(l.order_id)),
-    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)),
-  },{today:localToday(),horizonDays:+horizon,tieBreak}),[parts,procurement,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
+    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)&&!directIds.has(l.part_id)),
+  },{today:localToday(),horizonDays:+horizon,tieBreak}),[directIds,parts,procurement,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
 
   const draftKeys=useMemo(()=>{
     const d=new Map(purchaseOrders.filter(p=>p.status==="Draft").map(p=>[p.id,p.supplier_id]));
@@ -3346,7 +3375,64 @@ function AuditLogTab() {
   );
 }
 
+function FabricatorChecklist({ token }) {
+  const [lp,setLp]=useState(null);
+  const [err,setErr]=useState("");
+  const [name,setName]=useState(()=>{try{return localStorage.getItem("ct_fab_name")||"";}catch{return "";}});
+  const [busy,setBusy]=useState("");
+  async function load(){
+    try{
+      const cfg=loadConfig(); const sb=await initSB(cfg.url,cfg.key);
+      const {data,error}=await sb.rpc("get_lp_by_token",{p_token:token});
+      if(error) throw error;
+      if(!data) throw new Error("This link is not valid. Ask TGO for a new one.");
+      setLp(data);
+    }catch(e){ setErr(e.message||String(e)); }
+  }
+  useEffect(()=>{load();},[]);
+  async function toggle(it){
+    if(!name.trim()){ window.alert("Please type your name at the top first."); return; }
+    try{localStorage.setItem("ct_fab_name",name.trim());}catch{}
+    setBusy(it.key);
+    const {data,error}=await _sb.rpc("set_lp_line_checked",{p_token:token,p_key:it.key,p_checked:!it.checked,p_by:name.trim()});
+    setBusy("");
+    if(error||!data){ window.alert("Could not save. Check your connection and try again."); return; }
+    await load();
+  }
+  const wrap={maxWidth:640,margin:"0 auto",padding:16,fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
+  if(err) return <div style={wrap}><h2>ChlorTainer Shipment Checklist</h2><p style={{color:"#b00020"}}>{err}</p></div>;
+  if(!lp) return <div style={wrap}>Loading…</div>;
+  const items=lp.items||[]; const done=items.filter(i=>i.checked).length;
+  const groups=[]; items.forEach(it=>{ const g=(it.list||"Items"); let x=groups.find(a=>a.g===g); if(!x){x={g,rows:[]};groups.push(x);} x.rows.push(it); });
+  return <div style={wrap}>
+    <h2 style={{margin:"0 0 4px"}}>Shipment Checklist</h2>
+    <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
+    <div style={{margin:"12px 0"}}>
+      <input value={name} onChange={e=>setName(e.target.value)} placeholder="Your name" style={{width:"100%",boxSizing:"border-box",fontSize:18,padding:10,border:"1.5px solid #9DC3E6",borderRadius:8}}/>
+    </div>
+    <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden"}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
+    <div style={{fontSize:14,margin:"6px 0 14px"}}><b>{done}</b> of <b>{items.length}</b> checked</div>
+    {groups.map(g=><div key={g.g} style={{marginBottom:18}}>
+      <div style={{fontWeight:800,fontSize:15,margin:"6px 0",textTransform:"uppercase",letterSpacing:.5}}>{g.g}</div>
+      {g.rows.map(it=><button key={it.key} onClick={()=>toggle(it)} disabled={busy===it.key} style={{display:"flex",gap:12,alignItems:"flex-start",width:"100%",textAlign:"left",marginBottom:8,padding:12,border:`2px solid ${it.checked?"#2e9d5b":"#c9d3dd"}`,background:it.checked?"#f1faf4":"#fff",borderRadius:10,cursor:"pointer",fontFamily:"inherit"}}>
+        <span style={{fontSize:28,lineHeight:"28px"}}>{it.checked?"✅":"⬜"}</span>
+        <span style={{flex:1}}>
+          <span style={{display:"block",fontWeight:700,fontSize:16}}>{it.qty} × {it.description||it.partId}</span>
+          <span style={{display:"block",fontSize:12,color:"#667",fontFamily:"monospace"}}>{it.partId}{it.box&&it.box!==it.list?` · ${it.box}`:""}</span>
+          {it.source==="direct"&&<span style={{display:"block",fontSize:13,color:"#a35d00",marginTop:2}}>🚚 Comes direct from {it.supplier||"the supplier"}{it.supplier_po?` (PO ${it.supplier_po})`:""}. Check when it arrives and is packed with the vessel.</span>}
+          {it.checked&&it.checked_by&&<span style={{display:"block",fontSize:12,color:"#2e7d4f",marginTop:2}}>Checked by {it.checked_by}</span>}
+        </span>
+      </button>)}
+    </div>)}
+    <button onClick={load} style={{padding:"10px 16px",fontSize:15,borderRadius:8,border:"1px solid #9DC3E6",background:"#fff"}}>↻ Refresh</button>
+  </div>;
+}
+
 export default function App() {
+  let fabToken=null; try{ fabToken=new URLSearchParams(window.location.search).get("lp"); }catch{}
+  return fabToken ? <FabricatorChecklist token={fabToken}/> : <AppMain/>;
+}
+function AppMain() {
   const [config,setConfig]=useState(()=>loadConfig());
   const [user,setUser]=useState(null);
 

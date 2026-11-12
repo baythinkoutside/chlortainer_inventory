@@ -158,3 +158,6 @@ update parts set new_no_pending = true where new_part_no is null;
 
 -- 2026-11-11: pending parts drop the BC segment (CT-BC-2205 -> CT-2205). Applied as migration drop_bc_from_pending_part_ids.
 -- update parts set id = 'CT-' || replace(id,'CT-BC-','') where id like 'CT-BC-%' and new_no_pending;
+
+-- 2026-11-12: direct-ship + fabricator checklist (applied via migration direct_ship_and_lp_share_checklist)
+--   part_suppliers.ships_direct, license_plates.share_token, RPCs get_lp_by_token / set_lp_line_checked (anon-callable, token-scoped)
