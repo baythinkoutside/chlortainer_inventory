@@ -418,8 +418,12 @@ function useData() {
   // supplier-attributed rows first (preferred supplier first), then from any unassigned
   // remainder of parts.stock. Each pick records its source chunks so an undo, or a
   // cancelled LP, returns the stock exactly where it came from.
-  async function pickLpItem(lpId, items, partId, qty=1){
-    const idx=items.findIndex(i=>i.partId===partId);
+  // A part can sit on several lines of one LP (one per packing list). lineIdx targets one line exactly;
+  // otherwise a scan fills the first warehouse line of that part that is not yet full.
+  const pickable=i=>i.source!=="direct"&&!i.no_stock;
+  async function pickLpItem(lpId, items, partId, qty=1, lineIdx=null){
+    let idx=lineIdx!=null?lineIdx:items.findIndex(i=>i.partId===partId&&pickable(i)&&(i.picked||0)<i.qty);
+    if(idx<0) idx=items.findIndex(i=>i.partId===partId&&pickable(i));
     if(idx<0) throw new Error("That part is not on this license plate.");
     const it=items[idx];
     const n=Math.min(Math.max(1,+qty||1), it.qty-(it.picked||0));
@@ -460,8 +464,10 @@ function useData() {
     await dbRun(_sb.from("parts").update({stock:onHand+total}).eq("id",partId));
     await logAudit("stock_adjust","part",partId,{from:onHand,to:onHand+total,source:why,license_plate:lpId,qty:total});
   }
-  async function unpickLpItem(lpId, items, partId, qty=1){
-    const idx=items.findIndex(i=>i.partId===partId);
+  async function unpickLpItem(lpId, items, partId, qty=1, lineIdx=null){
+    let idx=lineIdx!=null?lineIdx:-1;
+    if(idx<0) for(let k=items.length-1;k>=0;k--) if(items[k].partId===partId&&pickable(items[k])&&(items[k].picked||0)>0){idx=k;break;}
+    if(idx<0) idx=items.findIndex(i=>i.partId===partId&&pickable(i));
     if(idx<0) throw new Error("That part is not on this license plate.");
     const it=items[idx];
     const n=Math.min(Math.max(1,+qty||1), it.picked||0);
@@ -1990,21 +1996,21 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
     const mb=(mfgBarcodes||[]).find(b=>(b.barcode||"").trim()===c);
     return mb?mb.part_id:null;
   }
-  async function pick(code, qty=scanQty){
+  async function pick(code, qty=scanQty, lineIdx=null){
     const partId=resolvePart(code);
     if(partId&&partId.ambiguous){ setPickMsg({ok:false,text:`"${code}" matches ${partId.ambiguous.map(p=>p.id).join(" and ")}. Scan the full ID instead.`}); return; }
     if(!partId){ setPickMsg({ok:false,text:`Unknown barcode "${code}".`}); return; }
     if(!items.find(i=>i.partId===partId)){ setPickMsg({ok:false,text:`${partId} is not on this license plate. Nothing changed.`}); return; }
     try{
-      const next=await actions.pickLpItem(lp.id,items,partId,qty);
+      const next=await actions.pickLpItem(lp.id,items,partId,qty,lineIdx);
       setItems(next);
-      const it=next.find(i=>i.partId===partId); const p=parts.find(x=>x.id===partId);
+      const it=next.find((x,k)=>(x.picked||0)!==(items[k]?.picked||0))||next.find(i=>i.partId===partId); const p=parts.find(x=>x.id===partId);
       setPickMsg({ok:true,text:`Picked ${p?.description||partId} — ${it.picked} of ${it.qty}`});
     }catch(e){ setPickMsg({ok:false,text:e.message}); }
   }
-  async function unpick(partId){
+  async function unpick(partId, lineIdx=null){
     try{
-      const next=await actions.unpickLpItem(lp.id,items,partId,1);
+      const next=await actions.unpickLpItem(lp.id,items,partId,1,lineIdx);
       setItems(next);
       setPickMsg({ok:true,text:`Returned 1 × ${partId} to inventory.`});
     }catch(e){ setPickMsg({ok:false,text:e.message}); }
@@ -2203,8 +2209,8 @@ function LpDetailModal({ lp, parts, customers, packingSlipTypes, mfgBarcodes, ac
                 {!isDirect(it)&&(canPick||pickedOf(it)>0)&&!it.no_stock&&<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
                   <Badge color={pickedOf(it)>=it.qty?"green":pickedOf(it)>0?"amber":"gray"}>Picked {pickedOf(it)} / {it.qty}</Badge>
                   {canPick&&<>
-                    <button onClick={()=>pick(it.partId,1)} disabled={pickedOf(it)>=it.qty} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>+1</button>
-                    <button onClick={()=>unpick(it.partId)} disabled={pickedOf(it)<=0} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>↩ Undo</button>
+                    <button onClick={()=>pick(it.partId,1,i)} disabled={pickedOf(it)>=it.qty} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>+1</button>
+                    <button onClick={()=>unpick(it.partId,i)} disabled={pickedOf(it)<=0} style={{border:`1px solid ${C.border}`,background:C.white,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>↩ Undo</button>
                   </>}
                 </div>}
               </div>
