@@ -164,3 +164,9 @@ update parts set new_no_pending = true where new_part_no is null;
 
 -- 2026-11-12: packing lists loaded from QBO slips (applied via migration order_packing_lines)
 --   order_packing_lines(order_id, list_type, part_id, qty, printed_no, printed_desc, slip_date, source_file); RLS: authenticated only.
+
+-- 2026-11-12: security lock-down (applied via migration lock_down_public_access_20261112)
+--   Public "allow all" policies on 20 tables replaced with signed-in-only ("authenticated all"); backup tables locked (RLS, no policies);
+--   anon has no table privileges; rename_part limited to signed-in users with fixed search_path; part-images storage writes need login.
+--   Only get_lp_by_token / set_lp_line_checked remain callable without login (fabricator checklist link).
+--   Previous policies are saved in security_policy_backup_20261112 for rollback.
