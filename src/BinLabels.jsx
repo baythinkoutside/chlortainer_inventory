@@ -21,8 +21,8 @@ export const LABEL_SIZES = {
   },
   // ── Item (SKU) labels: stuck on the part or its bag ──
   "item1x05": {
-    name: '1" × 0.5" thermal roll — part # and barcode (TGO item label)',
-    w: 1, h: 0.5, mode: "roll", kind: "item", tiny: true, mini: true,
+    name: '1" × 0.5" thermal roll — part #, description, barcode (TGO item label)',
+    w: 1, h: 0.5, mode: "roll", kind: "item", tiny: true, mini: true, desc: true,
   },
   "item2x1": {
     name: '2" × 1" thermal roll — part #, barcode, short description',
@@ -159,8 +159,9 @@ ${pageCss}
 .item.tiny{padding:.03in .05in;gap:.01in}
 .item.tiny .pid{font-size:7.5pt;text-align:center;width:100%}
 .item.tiny .row{justify-content:center}
-.item.mini{padding:.025in .02in .02in;gap:.005in}
+.item.mini{padding:.02in .03in .015in;gap:0}
 .item.mini .pid{font-size:6.5pt;letter-spacing:0}
+.item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}
 </style></head><body>
 ${body}
 <script>
