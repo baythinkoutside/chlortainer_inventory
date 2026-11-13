@@ -739,6 +739,22 @@ function useData() {
     await dbRun(_sb.from("purchase_orders").delete().eq("id",id));
     await logAudit("po_delete","purchase_order",id,{}); await fetchAll();
   }
+  // Receive stock with no PO (found stock, returns, deliveries not entered as a PO).
+  async function receiveWithoutPo(partId,qty,{supplierId=null,upc=null}={}){
+    qty=+qty;
+    if(!(qty>0)) throw new Error("Enter a quantity greater than zero.");
+    const {data:p,error}=await _sb.from("parts").select("stock").eq("id",partId).single();
+    if(error) throw new Error(error.message);
+    const before=p?.stock||0;
+    await dbRun(_sb.from("parts").update({stock:before+qty}).eq("id",partId));
+    if(supplierId){
+      const {data:row}=await _sb.from("supplier_stock").select("qty").eq("part_id",partId).eq("supplier_id",supplierId).maybeSingle();
+      await dbRun(_sb.from("supplier_stock").upsert({part_id:partId,supplier_id:supplierId,qty:(row?.qty||0)+qty,updated_at:new Date().toISOString()},{onConflict:"part_id,supplier_id"}));
+    }
+    const sup=suppliers.find(s=>s.id===supplierId);
+    await logAudit("stock_adjust","part",partId,{from:before,to:before+qty,source:"receive_no_po",qty_received:qty,supplier_id:supplierId,supplier_name:sup?.name||null,upc});
+    await fetchAll();
+  }
   // Receive qty against a PO line: bumps parts.stock and the supplier's own stock row, then rolls up PO status.
   async function receivePoLine(po,line,qty){
     qty = +qty;
@@ -765,7 +781,7 @@ function useData() {
     loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
-      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine}};
+      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1040,45 +1056,86 @@ function LookupResult({ result, parts, suppliers, onClear, replenByPart }) {
 }
 
 // ─── Receive Result ───────────────────────────────────────────────────────────
-function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, receiveQty, setReceiveQty, saving, onBack, onConfirm }) {
+function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, receiveQty, setReceiveQty, saving, onBack, onConfirm, purchaseOrders=[], poLines=[] }) {
   const live=parts.find(x=>x.id===result.data.id)||result.data;
   const mfgMatch=lastScanned?mfgBarcodes.find(m=>m.barcode.toUpperCase()===lastScanned.toUpperCase()):null;
   const sup=mfgMatch?suppliers.find(s=>s.id===mfgMatch.supplier_id):null;
-  const partSup=sup?live.suppliers?.find(s=>s.supplierId===sup.id):null;
+  const supName=id=>suppliers.find(s=>s.id===id)?.name||id||"No supplier";
+  // Open PO lines for this part. The scanned product barcode's supplier comes first, then the earliest expected.
+  const openLines=useMemo(()=>{
+    const open=new Map(purchaseOrders.filter(p=>["Sent","Partially Received"].includes(p.status)).map(p=>[p.id,p]));
+    return poLines.filter(l=>l.part_id===live.id&&open.has(l.po_id)&&(+l.qty-(+l.qty_received||0))>0)
+      .map(l=>({line:l,po:open.get(l.po_id),out:+l.qty-(+l.qty_received||0)}))
+      .sort((a,b)=>((b.po.supplier_id===sup?.id)-(a.po.supplier_id===sup?.id))||String(a.po.expected_date||"9999").localeCompare(String(b.po.expected_date||"9999")));
+  },[purchaseOrders,poLines,live.id,sup?.id]);
+  const [choice,setChoice]=useState(null);           // line id, or "none"
+  const [noPoSupplier,setNoPoSupplier]=useState(sup?.id||"");
+  useEffect(()=>{                                     // default: the first open PO line, received in full
+    if(openLines.length){ setChoice(openLines[0].line.id); setReceiveQty(openLines[0].out); }
+    else setChoice("none");
+  },[openLines.length]);
+  const sel=openLines.find(o=>o.line.id===choice);
+  const partSup=live.suppliers?.find(s=>s.supplierId===(sel?sel.po.supplier_id:noPoSupplier));
+  const unitCost=sel?.line.unit_cost??partSup?.unitCost;
+  const over=sel?Math.max(0,+receiveQty-sel.out):0;
+  function pick(id){ setChoice(id); const o=openLines.find(x=>x.line.id===id); if(o) setReceiveQty(o.out); }
+  const opt=(active)=>({display:"flex",gap:10,alignItems:"flex-start",textAlign:"left",width:"100%",padding:"10px 12px",borderRadius:8,cursor:"pointer",
+    border:`2px solid ${active?C.navy:C.border}`,background:active?"#EEF3F8":C.white,font:"inherit",color:C.navy,minHeight:48});
   return (
     <div style={{display:"grid",gap:14}}>
       <div style={{background:C.white,border:`2px solid ${C.amber}`,borderRadius:8,padding:16}}>
         <div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>Receiving into</div>
         <div style={{fontFamily:"monospace",fontSize:13,color:C.amber,fontWeight:700}}>{live.id}</div>
         <div style={{fontWeight:700,fontSize:15,color:C.navy,marginTop:2}}>{live.description}</div>
-        <div style={{display:"flex",gap:16,marginTop:8}}>
+        <div style={{display:"flex",gap:16,marginTop:8,flexWrap:"wrap"}}>
           <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Current Stock</div><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</div></div>
-          <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Location</div><div style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location}</div></div>
+          <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Location</div><div style={{fontFamily:"monospace",fontSize:14,color:C.navy}}>{live.location||"—"}</div></div>
+          {mfgMatch&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Scanned product barcode</div><div style={{fontSize:13,color:C.navy}}><span style={{fontFamily:"monospace"}}>{mfgMatch.barcode}</span>{sup?` · ${sup.name}`:""}</div></div>}
         </div>
       </div>
-      {mfgMatch&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:8,padding:12}}>
-        <div style={{fontSize:11,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Scanned via Product Barcode</div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
-          <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>UPC / Barcode</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.navy}}>{mfgMatch.barcode}</div></div>
-          {sup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Supplier</div><div style={{fontSize:13,fontWeight:700,color:C.navy}}>{sup.name}</div></div>}
-          {partSup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Unit Cost</div><div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.greenText}}>${partSup.unitCost?.toFixed(2)}</div></div>}
-          {partSup&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Lead Time</div><div style={{fontSize:13,color:C.navy}}>{partSup.leadDays}d</div></div>}
-        </div>
-      </div>}
+
+      <div style={{display:"grid",gap:8}}>
+        <div style={{fontSize:12,fontWeight:800,color:C.navy,textTransform:"uppercase",letterSpacing:.6}}>Receive against</div>
+        {openLines.map(o=><button key={o.line.id} onClick={()=>pick(o.line.id)} style={opt(choice===o.line.id)}>
+          <span style={{fontSize:18,lineHeight:"20px"}}>{choice===o.line.id?"◉":"○"}</span>
+          <span style={{flex:1,minWidth:0}}>
+            <span style={{display:"block",fontWeight:800,fontSize:14}}><span style={{fontFamily:"monospace"}}>{o.po.id}</span> · {supName(o.po.supplier_id)}{o.po.supplier_id&&o.po.supplier_id===sup?.id?" ✓":""}</span>
+            <span style={{display:"block",fontSize:12,color:C.textMid}}>{o.out} outstanding of {o.line.qty}{+o.line.qty_received?` (${o.line.qty_received} already received)`:""}{o.po.expected_date?` · expected ${fmtDate(o.po.expected_date)}`:""}</span>
+          </span>
+        </button>)}
+        <button onClick={()=>setChoice("none")} style={opt(choice==="none")}>
+          <span style={{fontSize:18,lineHeight:"20px"}}>{choice==="none"?"◉":"○"}</span>
+          <span style={{flex:1,minWidth:0}}>
+            <span style={{display:"block",fontWeight:800,fontSize:14}}>No purchase order</span>
+            <span style={{display:"block",fontSize:12,color:C.textMid}}>{openLines.length?"Found stock, a return, or a delivery with no PO in the app.":"There are no open POs for this part. Stock is added without a PO."}</span>
+          </span>
+        </button>
+        {choice==="none"&&(live.suppliers||[]).length>0&&<Sel label="Supplier (optional)" value={noPoSupplier} onChange={e=>setNoPoSupplier(e.target.value)}>
+          <option value="">Unknown / not from a supplier</option>
+          {live.suppliers.map(s=><option key={s.supplierId} value={s.supplierId}>{supName(s.supplierId)}</option>)}
+        </Sel>}
+      </div>
+
       <Field label="Quantity Received">
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <button onClick={()=>setReceiveQty(q=>Math.max(1,+q-1))} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
-          <input type="number" min="1" value={receiveQty} onChange={e=>setReceiveQty(e.target.value)} style={{...inputStyle,flex:1,textAlign:"center",fontSize:22,fontFamily:"monospace",fontWeight:700}}/>
-          <button onClick={()=>setReceiveQty(q=>+q+1)} style={{width:40,height:40,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+          <button onClick={()=>setReceiveQty(q=>Math.max(1,+q-1))} style={{width:48,height:48,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+          <input type="number" inputMode="numeric" min="1" value={receiveQty} onChange={e=>setReceiveQty(e.target.value)} style={{...inputStyle,flex:1,textAlign:"center",fontSize:22,fontFamily:"monospace",fontWeight:700,minHeight:48}}/>
+          <button onClick={()=>setReceiveQty(q=>+q+1)} style={{width:48,height:48,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
         </div>
       </Field>
+      {over>0&&<div style={{background:C.warnBg,border:`1px solid ${C.warnBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.warnText}}>
+        ⚠ That is <b>{over} more</b> than the {sel.out} outstanding on {sel.po.id}. The extra still goes into stock and is recorded on the PO as over-received.</div>}
       <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.greenText}}>
-        New stock total: <strong>{live.stock+(+receiveQty)} {live.uom}</strong>
-        {partSup&&<span style={{marginLeft:12}}>· Receipt value: <strong>${(+receiveQty*partSup.unitCost).toFixed(2)}</strong></span>}
+        New stock total: <strong>{live.stock+(+receiveQty||0)} {live.uom}</strong>
+        {unitCost!=null&&<span style={{marginLeft:12}}>· Receipt value: <strong>${((+receiveQty||0)*unitCost).toFixed(2)}</strong></span>}
+        {sel&&<div style={{marginTop:2}}>{sel.po.id} will show {(+sel.line.qty_received||0)+(+receiveQty||0)} of {sel.line.qty} received.</div>}
       </div>
       <div style={{display:"flex",gap:10}}>
-        <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={onBack}>← Back</Btn>
-        <Btn style={{flex:1,justifyContent:"center"}} disabled={saving} onClick={onConfirm}>{saving?"Saving…":"✅ Confirm Receipt"}</Btn>
+        <Btn variant="outline" style={{flex:1,justifyContent:"center",minHeight:48}} onClick={onBack}>← Back</Btn>
+        <Btn style={{flex:1,justifyContent:"center",minHeight:48}} disabled={saving||!choice||!(+receiveQty>0)}
+          onClick={()=>{ if(over>0&&!window.confirm(`Receive ${receiveQty} on ${sel.po.id}? Only ${sel.out} are outstanding.`)) return;
+            onConfirm(sel?{po:sel.po,line:sel.line}:{supplierId:noPoSupplier||null,upc:mfgMatch?.barcode||null}); }}>
+          {saving?"Saving…":"✅ Confirm Receipt"}</Btn>
       </div>
     </div>
   );
@@ -1273,7 +1330,7 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   </>);
 }
 
-function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart }) {
+function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, purchaseOrders, poLines }) {
   const [mode,setMode]=useState(null);
   const [result,setResult]=useState(null);
   const [notFound,setNotFound]=useState("");
@@ -1321,28 +1378,24 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart }) 
     }
   }
 
-  async function applyReceive(){
+  async function applyReceive(choice){
     if(!result||result.type!=="part")return;
-    setSaving(true);
     const live=parts.find(p=>p.id===result.data.id);
-    const mfgMatch=mfgBarcodes.find(m=>m.barcode.toUpperCase()===lastScanned.toUpperCase());
-    const sup=mfgMatch?suppliers.find(s=>s.id===mfgMatch.supplier_id):null;
-    await actions.updateStock(live.id,live.stock+(+receiveQty),{
-      qty_received:+receiveQty,
-      supplier_id:sup?.id||null,
-      supplier_name:sup?.name||null,
-      upc:mfgMatch?.barcode||null,
-      source:"receive",
-    });
-    showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id}`);
-    setSaving(false);setResult(null);setReceiveQty(1);setLastScanned("");
+    setSaving(true);
+    try{
+      if(choice?.po){ await actions.receivePoLine(choice.po,choice.line,+receiveQty); showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id} on ${choice.po.id}`); }
+      else { await actions.receiveWithoutPo(live.id,+receiveQty,choice||{}); showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id} (no PO)`); }
+      setResult(null);setReceiveQty(1);setLastScanned("");
+    }catch(e){ showToast(`⚠ Not saved: ${e.message||e}`); }
+    setSaving(false);
   }
+
 
   function reset(){setMode(null);setResult(null);setNotFound("");setLpMsg("");setPickLpId(null);}
 
   const modes=[
     {id:"lookup",icon:"🔍",label:"Look Up Part",desc:"Scan a SKU to view part details & stock level"},
-    {id:"receive",icon:"📥",label:"Receive Stock",desc:"Scan a SKU then enter quantity received"},
+    {id:"receive",icon:"📥",label:"Receive Stock",desc:"Scan a part, pick its open PO, confirm the quantity"},
     {id:"pick",icon:"📤",label:"Pick a License Plate",desc:"Scan the LP label, then pick its parts into the container"},
   ];
 
@@ -1420,7 +1473,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart }) 
         {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
-      {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
+      {mode==="receive"&&result?.type==="part"&&<ReceiveResult purchaseOrders={purchaseOrders} poLines={poLines} result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
 
       {mode==="pick"&&<div style={{display:"grid",gap:12}}>
         {!pickLpId&&<CameraScanner onScan={handleScan} onClose={reset} hint="Point at the license plate barcode (LP-…)"/>}
@@ -3757,7 +3810,7 @@ function MainApp({ user, onSignOut }) {
         </div>
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ {error}</div>}
         {loading?<Spinner text="Loading from Supabase…"/>
-          :tab==="scan"?<ScanTab replenByPart={replen.byPart} parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="scan"?<ScanTab purchaseOrders={purchaseOrders} poLines={poLines} replenByPart={replen.byPart} parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
           :tab==="parts"?<PartsTab replenByPart={replen.byPart} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
