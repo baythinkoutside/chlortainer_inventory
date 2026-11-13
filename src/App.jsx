@@ -1006,9 +1006,9 @@ function ManualEntry({ onSubmit }) {
 }
 
 // ─── Lookup Result ────────────────────────────────────────────────────────────
-function LookupResult({ result, parts, suppliers, onClear }) {
+function LookupResult({ result, parts, suppliers, onClear, replenByPart }) {
   const live=parts.find(x=>x.id===result.data.id)||result.data;
-  const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
+  const st=stockStatus(live,replenByPart?.get(live.id));
   return (
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"flex",justifyContent:"center",background:C.offWhite,borderRadius:8,padding:16}}>
@@ -1021,7 +1021,7 @@ function LookupResult({ result, parts, suppliers, onClear }) {
           {[["Category",<Badge color="navy">{live.category}</Badge>],
             ["Location",<code style={{fontSize:13}}>{live.location}</code>],
             ["On Hand",<span style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.navy}}>{live.stock} {live.uom}</span>],
-            ["Status",<Badge color={sc}>{live.stock===0?"Out of Stock":live.stock<live.minStock?"Low Stock":"In Stock"}</Badge>]
+            ["Status",<Badge color={st.color}>{st.label}</Badge>]
           ].map(([l,v])=>(
             <div key={l}><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>{l}</div>{v}</div>
           ))}
@@ -1273,7 +1273,7 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   </>);
 }
 
-function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
+function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart }) {
   const [mode,setMode]=useState(null);
   const [result,setResult]=useState(null);
   const [notFound,setNotFound]=useState("");
@@ -1411,7 +1411,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
         {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
-      {mode==="lookup"&&result?.type==="part"&&<LookupResult result={result} parts={parts} suppliers={suppliers} onClear={()=>setResult(null)}/>}
+      {mode==="lookup"&&result?.type==="part"&&<LookupResult replenByPart={replenByPart} result={result} parts={parts} suppliers={suppliers} onClear={()=>setResult(null)}/>}
 
       {mode==="receive"&&!result&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
         <CameraScanner onScan={handleScan} onClose={reset} hint="Point at the part barcode to receive stock"/>
@@ -1450,7 +1450,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
 }
 
 // ─── Parts Tab ────────────────────────────────────────────────────────────────
-function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
+function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions, replenByPart }) {
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("All");
   const [showAdd,setShowAdd]=useState(false);
@@ -1461,8 +1461,8 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
   const cats=["All",...Array.from(new Set(parts.map(p=>p.category)))];
   const filtered=parts.filter(p=>(filter==="All"||p.category===filter)&&partMatchesSearch(p,search));
   async function addPart(){if(!form.description||!form.newPartNo.trim())return;setSaving(true);try{await actions.addPart(form);setForm({newPartNo:"",legacyPartNo:"",description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});setShowAdd(false);}catch(e){alert(e.message);}setSaving(false);}
-  const sc=p=>p.stock===0?"red":p.stock<p.minStock?"amber":"green";
-  const sl=p=>p.stock===0?"Out of Stock":p.stock<p.minStock?"Low Stock":"In Stock";
+  const sc=p=>stockStatus(p,replenByPart?.get(p.id)).color;
+  const sl=p=>stockStatus(p,replenByPart?.get(p.id)).label;
   return <div>
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search part no., old no. or description…" style={{...inputStyle,flex:1,minWidth:180}}/>
@@ -1521,12 +1521,12 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions }) {
         </div>
       </div>
     </Modal>}
-    {viewPart&&<PartDetailModal part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions} onClose={()=>setViewPart(null)}/>}
+    {viewPart&&<PartDetailModal replenByPart={replenByPart} part={viewPart} suppliers={suppliers} parts={parts} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions} onClose={()=>setViewPart(null)}/>}
     {showImport&&<CsvImportModal type="parts" actions={actions} existingRecords={parts} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
 
-function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, actions, onClose }) {
+function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, actions, onClose, replenByPart }) {
   const live=parts.find(x=>x.id===part.id)||part;
   const partMfgBarcodes=mfgBarcodes.filter(m=>m.part_id===live.id);
   const partSupplierStock=supplierStock.filter(s=>s.part_id===live.id);
@@ -1564,7 +1564,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
   async function addBc(){if(!addBcForm.barcode)return;setSaving(true);try{await actions.addMfgBarcode(live.id,addBcForm.supplierId||null,addBcForm.barcode,addBcForm.description);}catch(e){alert("Barcode already exists: "+addBcForm.barcode);}setSaving(false);setAddBcForm({barcode:"",supplierId:"",description:""});setScanningBc(false);}
   async function deleteBc(id){setSaving(true);await actions.deleteMfgBarcode(id);setSaving(false);}
   const avail=suppliers.filter(s=>!live.suppliers?.find(x=>x.supplierId===s.id));
-  const sc=live.stock===0?"red":live.stock<live.minStock?"amber":"green";
+  const st=stockStatus(live,replenByPart?.get(live.id));
 
   async function handleImageUpload(e){
     const file=e.target.files?.[0];
@@ -1637,7 +1637,7 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
         <div style={{display:"flex",gap:24,alignItems:"center",marginBottom:12}}>
           <div><div style={{fontFamily:"monospace",fontSize:30,fontWeight:700,color:C.navy}}>{live.stock}</div><div style={{fontSize:11,color:C.textLight}}>total on hand</div></div>
           <div><div style={{fontFamily:"monospace",fontSize:18,color:C.textMid}}>{live.minStock}</div><div style={{fontSize:11,color:C.textLight}}>minimum</div></div>
-          <Badge color={sc}>{live.stock===0?"Out of Stock":live.stock<live.minStock?"Low Stock":"In Stock"}</Badge>
+          <Badge color={st.color}>{st.label}</Badge>
         </div>
         {/* Per-supplier stock breakdown */}
         {partSupplierStock.length>0&&!editStock&&(
@@ -2092,37 +2092,63 @@ function SuppliersTab({ suppliers, parts, actions }) {
     {showImport&&<CsvImportModal type="suppliers" actions={actions} existingRecords={suppliers} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
-function InventoryTab({ parts, suppliers }) {
-  const [filter,setFilter]=useState("All");
-  const alerts=parts.filter(p=>p.stock<p.minStock);
-  const view=filter==="Low/Out"?alerts:parts;
+function InventoryTab({ parts, suppliers, replen, onOpenReplenishment }) {
+  const {byPart,result}=replen;
+  const [search,setSearch]=useState("");
+  const statusOf=p=>stockStatus(p,byPart.get(p.id));
+  const needs=p=>{ const r=byPart.get(p.id); return !!r&&((r.order_qty||0)>0||r.flags.some(f=>f==="expedite_open_po"||f==="shortage_but_do_not_reorder")); };
+  const counts={needs:parts.filter(needs).length, out:parts.filter(p=>!(p.stock>0)).length, all:parts.length};
+  const [filter,setFilter]=useState(counts.needs>0?"needs":"all");
+  const rank={red:0,amber:1,blue:2,gray:3,green:4};
+  const view=parts.filter(p=>(filter==="all"||(filter==="needs"?needs(p):!(p.stock>0)))&&partMatchesSearch(p,search))
+    .sort((a,b)=>(rank[statusOf(a).color]-rank[statusOf(b).color])||(String(a.location||"~").localeCompare(String(b.location||"~")))||a.id.localeCompare(b.id));
+  const supName=id=>suppliers.find(s=>s.id===id)?.name;
+  const chip=(k,label)=><button key={k} onClick={()=>setFilter(k)} style={{border:`1.5px solid ${filter===k?C.navy:C.border}`,background:filter===k?C.navy:C.white,color:filter===k?"#fff":C.navy,
+    borderRadius:16,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{label} <span style={{opacity:.7}}>{counts[k]}</span></button>;
+  const num=(v,l,color)=><div style={{textAlign:"right",minWidth:54}}><div style={{fontFamily:"monospace",fontSize:18,fontWeight:700,color:color||C.navy}}>{v}</div><div style={{fontSize:10,color:C.textLight}}>{l}</div></div>;
   return <div>
-    <div style={{background:C.warnBg,border:`1.5px solid ${C.warnBdr}`,borderLeft:`4px solid ${C.warnText}`,borderRadius:7,padding:"14px 18px",marginBottom:18,display:"flex",alignItems:"center",gap:12}}>
-      <span style={{fontSize:22}}>⚠️</span>
-      <div style={{flex:1}}><div style={{fontWeight:800,fontSize:14,color:C.warnText}}>{alerts.length} SKU{alerts.length!==1?"s":""} need replenishment</div></div>
-      <select value={filter} onChange={e=>setFilter(e.target.value)} style={{...inputStyle,fontSize:13}}><option>All</option><option>Low/Out</option></select>
+    <div style={{background:C.offWhite,border:`1px solid ${C.border}`,borderRadius:7,padding:"10px 14px",marginBottom:12,fontSize:12,color:C.textMid,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+      <span style={{flex:1,minWidth:200}}>Order suggestions come from <b>Replenishment</b>. It weighs open orders, open POs, lead times and each part's minimum stock, so every screen gives the same answer.</span>
+      <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={onOpenReplenishment}>📈 Open Replenishment</Btn>
+    </div>
+    <div style={{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search part no., old no. or description…" style={{...inputStyle,flex:"1 1 220px"}}/>
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",paddingBottom:2}}>
+      {chip("needs","Needs ordering")}{chip("out","Out of stock")}{chip("all","All parts")}
     </div>
     <div style={{display:"grid",gap:10}}>
       {view.map(p=>{
-        const pct=p.minStock>0?Math.min(1,p.stock/p.minStock):1;
-        const barColor=p.stock===0?C.red:p.stock<p.minStock?C.warnText:C.greenText;
-        const cheapest=[...(p.suppliers||[])].sort((a,b)=>a.unitCost-b.unitCost)[0];
-        const sup=cheapest?suppliers.find(s=>s.id===cheapest.supplierId):null;
-        return <div key={p.id} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
-            <div><span style={{fontFamily:"monospace",fontSize:11,color:C.textLight}}>{p.id}</span><div style={{fontWeight:700,fontSize:14,color:C.navy,marginTop:2}}>{p.description}</div><div style={{fontSize:11,color:C.textLight,marginTop:2}}>📍 {p.location||"—"} · {p.category}</div></div>
-            <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:20,fontWeight:700,color:C.navy}}>{p.stock}<span style={{fontSize:13,color:C.textLight}}>/{p.minStock}</span></div><div style={{fontSize:10,color:C.textLight}}>on hand/min</div></div>
+        const r=byPart.get(p.id); const st=statusOf(p);
+        const qty=r?(r.firm_order_qty||r.order_qty):0;
+        return <div key={p.id} style={{background:C.white,border:`1.5px solid ${st.color==="red"?C.redBorder:C.border}`,borderRadius:7,padding:"12px 16px",display:"grid",gap:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><span style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:C.amber}}>{p.id}</span><Badge color={st.color}>{st.label}</Badge></div>
+              <div style={{fontWeight:700,fontSize:14,color:C.navy,marginTop:2}}>{p.description}</div>
+              <div style={{fontSize:11,color:C.textLight,marginTop:2}}>📍 {p.location||"—"} · {p.category}{+p.minStock>0?` · min ${p.minStock}`:""}</div>
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              {num(p.stock??0,`${p.uom||"EA"} on hand`,!(p.stock>0)?C.red:C.navy)}
+              {r?.allocated_qty>0&&num(r.allocated_qty,"reserved",C.textMid)}
+              {r?.on_order>0&&num(r.on_order,"on order",C.greenText)}
+            </div>
           </div>
-          <div style={{background:C.border,borderRadius:4,height:6,marginBottom:p.stock<p.minStock?12:0}}><div style={{background:barColor,height:"100%",borderRadius:4,width:`${pct*100}%`,transition:"width .4s"}}/></div>
-          {p.stock<p.minStock&&sup&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderLeft:`4px solid ${C.greenText}`,borderRadius:6,padding:"10px 14px",display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-            <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,color:C.greenText,textTransform:"uppercase",letterSpacing:.6,marginBottom:2}}>Best Supplier</div><div style={{fontSize:13,fontWeight:700,color:C.navy}}>{sup.name}</div><div style={{fontFamily:"monospace",fontSize:11,color:C.textMid,marginTop:2}}>{cheapest.mfgPartNo} · ${cheapest.unitCost.toFixed(2)}/{p.uom} · {cheapest.leadDays}d lead</div></div>
-            <div style={{textAlign:"right"}}><div style={{fontSize:13,fontWeight:700,color:C.greenText}}>Order {p.minStock-p.stock+Math.round(p.minStock*.5)} {p.uom}</div><div style={{fontSize:11,color:C.textMid}}>≈ ${((p.minStock-p.stock+Math.round(p.minStock*.5))*cheapest.unitCost).toFixed(2)}</div></div>
+          {r&&(qty>0||r.flags.length>0)&&<div onClick={onOpenReplenishment} style={{cursor:"pointer",background:st.color==="red"?C.redLight:st.color==="amber"?C.warnBg:"#EBF2FA",border:`1px solid ${st.color==="red"?C.redBorder:st.color==="amber"?C.warnBdr:"#9DC3E6"}`,borderRadius:6,padding:"8px 12px",fontSize:12,color:C.navy,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{flex:1,minWidth:180}}>
+              {qty>0?<><b>Order {qty} {p.uom||"EA"}</b>{r.order_by?` by ${fmtDate(r.order_by)}`:""}{r.need_by?` · needed ${fmtDate(r.need_by)}`:""}{r.supplier_id?` · ${supName(r.supplier_id)||r.supplier_id}`:" · no supplier set"}</>
+                :<b>{r.flags.includes("expedite_open_po")?`Open PO arrives ${r.po_late_days} day(s) late. Expedite it.`:"Short, but set to do not reorder."}</b>}
+              <div style={{color:C.textMid,marginTop:2}}>{r.reason}</div>
+            </span>
+            <span style={{fontWeight:700,color:C.navy,whiteSpace:"nowrap"}}>Replenishment ›</span>
           </div>}
         </div>;
       })}
+      {view.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>{filter==="needs"?"Nothing needs ordering right now.":"No parts match."}</div>}
     </div>
   </div>;
 }
+
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
 function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes, mfgBarcodes, actions, focus, onFocusDone, onOpenOrder }) {
@@ -3363,6 +3389,48 @@ function PoGroupCard({ g, supplier, parts, draftKeys, canCreate, onCreate, busy,
   </div>;
 }
 
+// ─── Shared replenishment forecast ───────────────────────────────────────────
+// One forecast drives the header badge, the Inventory and Parts tabs, and the Replenishment tab,
+// so every screen gives the same answer. A part's Min Stock acts as its minimum unless the
+// item's procurement settings give one.
+function useReplenishmentForecast({ parts, procurement, controlLines, packingSlipTypes, purchaseOrders, poLines, kitLines, orderLines, maintLines, orders }, { horizon="180", tieBreak="maintenance" }={}) {
+  const supplierLinks=useMemo(()=>parts.flatMap(p=>(p.suppliers||[]).map(s=>({part_id:p.id,supplier_id:s.supplierId,mfg_part_no:s.mfgPartNo,lead_days:s.leadDays,unit_cost:s.unitCost}))),[parts]);
+  const liveOrders=useMemo(()=>new Set(orders.filter(o=>!["Cancelled","Closed"].includes(o.status)).map(o=>o.id)),[orders]);
+  const openPoLines=useMemo(()=>{
+    const open=new Map(purchaseOrders.filter(p=>["Sent","Partially Received"].includes(p.status)).map(p=>[p.id,p]));
+    return poLines.filter(l=>open.has(l.po_id)).map(l=>({part_id:l.part_id,qty:l.qty,qty_received:l.qty_received,expected_date:open.get(l.po_id).expected_date||l.needed_by}));
+  },[purchaseOrders,poLines]);
+  const directIds=useMemo(()=>new Set(parts.filter(p=>(p.suppliers||[]).length>0&&p.suppliers.every(x=>x.shipsDirect)).map(p=>p.id)),[parts]);
+  const procWithMins=useMemo(()=>{
+    const byPart=new Map(procurement.map(p=>[p.part_id,p]));
+    const out=procurement.map(p=>{ const part=parts.find(x=>x.id===p.part_id); return p.min_qty==null&&+part?.minStock>0?{...p,min_qty:+part.minStock}:p; });
+    parts.forEach(p=>{ if(!byPart.has(p.id)&&+p.minStock>0&&!directIds.has(p.id)) out.push({part_id:p.id,min_qty:+p.minStock}); });
+    return out;
+  },[procurement,parts,directIds]);
+  const result=useMemo(()=>forecast({
+    parts,procurement:procWithMins,supplierLinks,controlLines:controlLines.filter(c=>!directIds.has(c.part_id)),listTypes:packingSlipTypes,openPoLines,kitLines,
+    orderLines:orderLines.filter(l=>liveOrders.has(l.order_id)),
+    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)&&!directIds.has(l.part_id)),
+  },{today:localToday(),horizonDays:+horizon,tieBreak}),[directIds,parts,procWithMins,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
+  const byPart=useMemo(()=>new Map(result.recommendations.map(r=>[r.part_id,r])),[result]);
+  // Same rule as the Replenishment tab's "Late" + "Order soon" cards.
+  const toOrderNow=useMemo(()=>result.recommendations.filter(r=>["late","order_soon"].includes(r.urgency)&&(r.firm_order_qty>0||r.flags.includes("expedite_open_po"))).length,[result]);
+  return {result,byPart,toOrderNow};
+}
+// Stock status for a part, from the shared forecast.
+function stockStatus(part, rec){
+  if(rec){
+    if(rec.flags.includes("expedite_open_po")) return {label:"Expedite PO",color:"red"};
+    if(rec.flags.includes("shortage_but_do_not_reorder")) return {label:"Short · no reorder",color:"red"};
+    const qty=rec.firm_order_qty||rec.order_qty;
+    if(qty>0&&rec.urgency==="late") return {label:"Order now (late)",color:"red"};
+    if(qty>0&&rec.urgency==="order_soon") return {label:"Order soon",color:"amber"};
+    if(qty>0) return {label:rec.firm_order_qty?"Order planned":"Tentative need",color:"blue"};
+  }
+  if(!(part?.stock>0)) return {label:"Out of stock",color:"gray"};
+  return {label:"OK",color:"green"};
+}
+
 function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, packingSlipTypes, maintLines, kitLines, procurement, purchaseOrders, poLines, actions }) {
   const [view,setView]=useState("recs");
   const [horizon,setHorizon]=useState("180");
@@ -3374,18 +3442,7 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
   const [busy,run]=useRun();
   const [msg,setMsg]=useState("");
 
-  const supplierLinks=useMemo(()=>parts.flatMap(p=>(p.suppliers||[]).map(s=>({part_id:p.id,supplier_id:s.supplierId,mfg_part_no:s.mfgPartNo,lead_days:s.leadDays,unit_cost:s.unitCost}))),[parts]);
-  const liveOrders=useMemo(()=>new Set(orders.filter(o=>!["Cancelled","Closed"].includes(o.status)).map(o=>o.id)),[orders]);
-  const openPoLines=useMemo(()=>{
-    const open=new Map(purchaseOrders.filter(p=>["Sent","Partially Received"].includes(p.status)).map(p=>[p.id,p]));
-    return poLines.filter(l=>open.has(l.po_id)).map(l=>({part_id:l.part_id,qty:l.qty,qty_received:l.qty_received,expected_date:open.get(l.po_id).expected_date||l.needed_by}));
-  },[purchaseOrders,poLines]);
-  const directIds=useMemo(()=>new Set(parts.filter(p=>(p.suppliers||[]).length>0&&p.suppliers.every(x=>x.shipsDirect)).map(p=>p.id)),[parts]);
-  const result=useMemo(()=>forecast({
-    parts,procurement,supplierLinks,controlLines:controlLines.filter(c=>!directIds.has(c.part_id)),listTypes:packingSlipTypes,openPoLines,kitLines,
-    orderLines:orderLines.filter(l=>liveOrders.has(l.order_id)),
-    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)&&!directIds.has(l.part_id)),
-  },{today:localToday(),horizonDays:+horizon,tieBreak}),[directIds,parts,procurement,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
+  const {result}=useReplenishmentForecast({parts,procurement,controlLines,packingSlipTypes,purchaseOrders,poLines,kitLines,orderLines,maintLines,orders},{horizon,tieBreak});
 
   const draftKeys=useMemo(()=>{
     const d=new Map(purchaseOrders.filter(p=>p.status==="Draft").map(p=>[p.id,p.supplier_id]));
@@ -3639,7 +3696,8 @@ function MainApp({ user, onSignOut }) {
   const {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
-  const alerts=parts.filter(p=>p.stock<p.minStock).length;
+  const replen=useReplenishmentForecast({parts,procurement,controlLines,packingSlipTypes,purchaseOrders,poLines,kitLines,orderLines,maintLines,orders});
+  const alerts=replen.toOrderNow;   // parts to order now: same count as Replenishment's Late + Order soon
   const [isAdmin,setIsAdmin]=useState(user?.app_metadata?.role==="admin");
   useEffect(()=>{ // re-read from server so admin changes apply without signing out
     _sb.auth.getUser().then(({data})=>{ if(data?.user) setIsAdmin(data.user.app_metadata?.role==="admin"); });
@@ -3672,7 +3730,7 @@ function MainApp({ user, onSignOut }) {
             <div style={{display:"flex",alignItems:"center",gap:12}}>
               {loading?<span style={{fontSize:11,color:C.textLight}}>Syncing…</span>
                 :<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.greenText,background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:12,padding:"3px 10px",fontWeight:700}}>🟢 Live</div>}
-              {alerts>0&&<div style={{background:C.amber,color:C.navy,borderRadius:20,padding:"4px 12px",fontSize:12,fontWeight:800}}>⚠ {alerts} Low Stock</div>}
+              {alerts>0&&<button onClick={()=>setTab("replenish")} title="Parts to order now (Replenishment: Late + Order soon)" style={{background:C.amber,color:C.navy,border:"none",cursor:"pointer",borderRadius:20,padding:"4px 12px",fontSize:12,fontWeight:800}}>⚠ {alerts} to order</button>}
               <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end"}}>
                 <span style={{fontSize:11,color:C.amber,fontWeight:700}}>{user?.email}</span>
                 <button onClick={onSignOut} style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:C.textLight,padding:0}}>Sign out</button>
@@ -3686,7 +3744,7 @@ function MainApp({ user, onSignOut }) {
                 color:tab===t.id?C.amber:"#8A9BB0",borderBottom:tab===t.id?`3px solid ${C.amber}`:"3px solid transparent",
                 display:"flex",alignItems:"center",gap:5,transition:"color .15s",whiteSpace:"nowrap",letterSpacing:.2}}>
                 {t.icon} {t.label}
-                {t.id==="inventory"&&alerts>0&&<span style={{background:C.amber,color:C.navy,borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:800}}>{alerts}</span>}
+                {t.id==="replenish"&&alerts>0&&<span style={{background:C.amber,color:C.navy,borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:800}}>{alerts}</span>}
               </button>
             ))}
           </div>
@@ -3699,11 +3757,11 @@ function MainApp({ user, onSignOut }) {
         </div>
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ {error}</div>}
         {loading?<Spinner text="Loading from Supabase…"/>
-          :tab==="scan"?<ScanTab parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
-          :tab==="parts"?<PartsTab parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
+          :tab==="scan"?<ScanTab replenByPart={replen.byPart} parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="parts"?<PartsTab replenByPart={replen.byPart} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} supplierStock={supplierStock} actions={actions}/>
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
-          :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
+          :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} replen={replen} onOpenReplenishment={()=>setTab("replenish")}/>
           :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions} focus={lpFocus} onFocusDone={()=>setLpFocus(null)} onOpenOrder={openOrder}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} focus={orderFocus} onFocusDone={()=>setOrderFocus(null)} onOpenLp={openLp}/>

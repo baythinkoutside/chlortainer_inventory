@@ -193,6 +193,11 @@ function evaluate({ stock, planned, onOrder, proc, lead, monthly, opts }) {
     }
     default: // order_driven
       if (firstShort) { orderQty = Math.ceil(shortQty) + Math.ceil((monthly / 30) * review); reason = "projected shortage vs. dated demand"; }
+      // Minimum stock is a floor even with no dated demand: top back up to the minimum.
+      else if (proc.min_qty != null && position < Number(proc.min_qty)) {
+        orderQty = Number(proc.min_qty) - position; reason = `on hand + on order ${position} below minimum ${proc.min_qty}`;
+        needBy = addDays(today, lead);   // order today; not "late" just because it dipped below min
+      }
   }
   orderQty = proc.policy === "do_not_reorder" ? 0 : roundUpOrder(orderQty, proc.moq, proc.order_multiple);
   return { orderQty, needBy, reason, flags, safety, position, shortSource, lateReceipts };
