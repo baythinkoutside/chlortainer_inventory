@@ -496,7 +496,7 @@ function useData() {
     const {items,skipped,fromPacking}=buildOrderLpItems(order);
     if(items.length===0) throw new Error("Nothing to load: this order has no control-list lines (or no vessel/part lines yet).");
     const cust=customers.find(c=>c.id===order.customer_id);
-    const id=await createLP({type:"Outbound",destination:[cust?.name,order.project_name].filter(Boolean).join(" - ")||order.id,status:"Pending",quote_number:order.quote_number,po_number:order.po_number,customer_id:order.customer_id,order_id:order.id},items);
+    const id=await createLP({type:"Outbound",destination:[cust?.name,order.project_name].filter(Boolean).join(" - ")||order.id,status:"Open",quote_number:order.quote_number,po_number:order.po_number,customer_id:order.customer_id,order_id:order.id},items);
     await fetchAll();
     return {id,lines:items.length,direct:items.filter(i=>i.source==="direct").length,skipped,fromPacking};
   }
@@ -1248,7 +1248,7 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   const {picked:totalPicked,qty:totalQty}=lpPickProgress(items);
   const remaining=pickRows.filter(r=>pickedOf(r.it)<r.it.qty);
   const shown=show==="remaining"?remaining:pickRows;
-  const canPick=lp.status==="Pending"&&(lp.type||"Outbound")==="Outbound";
+  const canPick=lpIsPrep(lp.status)&&(lp.type||"Outbound")==="Outbound";
 
   function feedback(ok,text){ setMsg({ok,text}); if(!ok&&navigator.vibrate) navigator.vibrate([60,60,60]); }
   function refocus(){ if(!isTouch()) inputRef.current?.focus(); }   // keeps a USB/Bluetooth scanner typing into the box
@@ -1314,7 +1314,7 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
       <div style={{maxWidth:720,margin:"0 auto",padding:14,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:12,boxSizing:"border-box"}}>
         {!canPick
           ? <div style={{background:C.warnBg,border:`1.5px solid ${C.warnBdr}`,borderRadius:8,padding:14,fontSize:14,color:C.warnText}}>
-              This license plate is <b>{lp.status}</b>{(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only pending outbound license plates can be picked.
+              This license plate is <b>{lp.status}</b>{(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only Open or Picking outbound license plates can be picked.
             </div>
           : <>
             {/* Scan bar */}
@@ -1402,7 +1402,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
     if(!t) return;
     const lp=lps.find(l=>l.id.toUpperCase()===t);
     if(lp){
-      if(lp.status!=="Pending"||(lp.type||"Outbound")!=="Outbound"){ setLpMsg(`${lp.id} is ${lp.status}${(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only pending outbound license plates can be picked.`); return; }
+      if(!lpIsPrep(lp.status)||(lp.type||"Outbound")!=="Outbound"){ setLpMsg(`${lp.id} is ${lp.status}${(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only Open or Picking outbound license plates can be picked.`); return; }
       setPickLpId(lp.id); return;
     }
     if(findPartsByCode(parts,t).length||mfgBarcodes.some(m=>m.barcode.toUpperCase()===t)){ setLpMsg("That is a part barcode. Scan the license plate label first, or choose the license plate below."); return; }
@@ -1533,7 +1533,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
         <ManualEntry onSubmit={handleScan}/>
         {lpMsg&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>⚠ {lpMsg}</div>}
         {(()=>{
-          const open=lps.filter(l=>l.status==="Pending"&&(l.type||"Outbound")==="Outbound");
+          const open=lps.filter(l=>lpIsPrep(l.status)&&(l.type||"Outbound")==="Outbound");
           return <div style={{display:"grid",gap:8}}>
             <SectionTitle>Ready to pick ({open.length})</SectionTitle>
             {open.length===0&&<div style={{textAlign:"center",padding:16,color:C.textLight,fontSize:13}}>No pending outbound license plates. Create one from an order first.</div>}
@@ -2261,7 +2261,7 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
   const [viewLp,setViewLp]=useState(null);
   const [pickId,setPickId]=useState(null);
   const [search,setSearch]=useState("");
-  const [statusFilter,setStatusFilter]=useState("Pending");
+  const [statusFilter,setStatusFilter]=useState("Active");
   // Opened from another tab (e.g. an order): show that LP, or go straight to picking.
   useEffect(()=>{
     if(!focus) return;
@@ -2269,15 +2269,15 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
     setStatusFilter("All");
     onFocusDone?.();
   },[focus]);
-  const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
+  const sc=lpStatusColor;
   const custName=id=>customers?.find(c=>c.id===id)?.name||"";
   const openIssues=lp=>(lp.items||[]).filter(i=>i.issue&&!i.issue.resolved_at).length;
-  const counts={All:lps.length,Problems:lps.filter(l=>openIssues(l)>0).length};
-  ["Pending","Shipped","Received","Cancelled"].forEach(s=>{counts[s]=lps.filter(l=>l.status===s).length;});
+  const FILTERS={Active:l=>!["Delivered","Cancelled"].includes(l.status), "To pick":l=>lpIsPrep(l.status), "At fabricator":l=>lpAtFabricator(l.status),
+    Shipped:l=>l.status==="Shipped", Delivered:l=>l.status==="Delivered", Cancelled:l=>l.status==="Cancelled", All:()=>true, Problems:l=>openIssues(l)>0};
+  const counts=Object.fromEntries(Object.entries(FILTERS).map(([k,f])=>[k,lps.filter(f).length]));
   const q=search.trim().toLowerCase();
   const shown=lps.filter(lp=>{
-    if(statusFilter==="Problems"){ if(!openIssues(lp)) return false; }
-    else if(statusFilter!=="All"&&lp.status!==statusFilter) return false;
+    if(!(FILTERS[statusFilter]||FILTERS.All)(lp)) return false;
     if(!q) return true;
     const hay=[lp.id,lp.destination,custName(lp.customer_id),lp.quote_number,lp.po_number,lp.order_id,lp.packing_slip_type,
       fabricators?.find(f=>f.id===lp.fabricator_id)?.name,...(lp.items||[]).map(i=>i.partId)].filter(Boolean).join(" ").toLowerCase();
@@ -2291,7 +2291,7 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
       <Btn onClick={()=>setShowCreate(true)}>+ Create License Plate</Btn>
     </div>
     <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",paddingBottom:2}}>
-      {chip("Pending","Pending")}{chip("Shipped","Shipped")}{chip("Received","Received")}{chip("Cancelled","Cancelled")}{chip("All","All")}
+      {["Active","To pick","At fabricator","Shipped","Delivered","Cancelled","All"].map(k=>chip(k,k))}
       {counts.Problems>0&&chip("Problems","⚠ Problems")}
     </div>
     <div style={{display:"grid",gap:10}}>
@@ -2323,7 +2323,7 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
                 <span>{(lp.items||[]).length} line{(lp.items||[]).length!==1?"s":""}</span>
               </div>
             </div>
-            {outbound&&lp.status==="Pending"&&pr.qty>0&&<button onClick={e=>{e.stopPropagation();setPickId(lp.id);}}
+            {outbound&&lpIsPrep(lp.status)&&pr.qty>0&&<button onClick={e=>{e.stopPropagation();setPickId(lp.id);}}
               style={{flexShrink:0,minHeight:44,minWidth:72,borderRadius:8,border:"none",background:done?C.greenText:C.navy,color:"#fff",fontWeight:800,fontSize:13,cursor:"pointer"}}>{done?"✓ Picked":"▶ Pick"}</button>}
           </div>
           {outbound&&pr.qty>0&&<div>
@@ -2345,7 +2345,7 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
 }
 
 function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose }) {
-  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Pending",packing_slip_type:"",quote_number:"",po_number:"",customer_id:""});
+  const [form,setForm]=useState({type:"Outbound",destination:"",status:"Open",packing_slip_type:"",quote_number:"",po_number:"",customer_id:""});
   const [items,setItems]=useState([]);
   const [pickPart,setPickPart]=useState(""); const [pickQty,setPickQty]=useState(1);
   const [saving,setSaving]=useState(false);
@@ -2362,7 +2362,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Sel label="Type" value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Outbound</option><option>Inbound</option><option>Transfer</option></Sel>
-        <Sel label="Status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}><option>Pending</option><option>Shipped</option><option>Received</option></Sel>
+        <div style={{fontSize:12,color:C.textMid,alignSelf:"end",paddingBottom:10}}>Starts as <b>Open</b>; picking moves it to Picking.</div>
       </div>
       <Field label="Customer">
         <select value={form.customer_id} onChange={e=>{
@@ -2416,6 +2416,16 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
+// ─── License plate statuses ──────────────────────────────────────────────────
+// Open → Picking (automatic on first pick) → Sent to Fabricator (TGO) → Received / Received with
+// issues (automatic from the fabricator's check-off) → Shipped (fabricator, to the customer) →
+// Delivered (TGO). Maintenance LPs can go Open/Picking → Shipped directly. The database trigger
+// lp_auto_status keeps the automatic steps right whoever edits the LP.
+const LP_STATUSES=["Open","Picking","Sent to Fabricator","Received","Received with issues","Shipped","Delivered","Cancelled"];
+const lpStatusColor=s=>({Open:"gray",Picking:"amber","Sent to Fabricator":"blue",Received:"green","Received with issues":"red",Shipped:"navy",Delivered:"green",Cancelled:"red"}[s]||"gray");
+const lpIsPrep=s=>s==="Open"||s==="Picking";          // still being picked at TGO: editable, pickable
+const lpAtFabricator=s=>s==="Sent to Fabricator"||s==="Received"||s==="Received with issues";
+
 // ─── License plate print (packing list) ──────────────────────────────────────
 // Letter-size, table layout: grouped by packing list type (Main / Loose / Spare…), then by box,
 // lines in bin order. Direct-ship items listed separately. Photos and line barcodes can be
@@ -2437,7 +2447,7 @@ async function printLicensePlate({ lp, items, parts, customer, packingSlipTypes=
   const direct=items.filter(isDirect);
   const lists=[...new Set(warehouse.map(x=>listOf(x.it)))].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
   const sumQty=arr=>arr.reduce((s,x)=>s+(+x.qty||0),0);
-  const shipped=["Shipped","Received"].includes(lp.status);
+  const shipped=!lpIsPrep(lp.status)&&lp.status!=="Cancelled";
   const hasBins=items.some(it=>!isDirect(it)&&String(partOf(it.partId)?.location||"").trim());
   const pcs=n=>`${n} pc${n===1?"":"s"}`;
   const bcSvg=(code,cls)=>{
@@ -2570,7 +2580,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   // quantities ~0.7 s after the last change). Status changes use the buttons at the top.
   const [status,setStatus]=useState(lp.status);
   useEffect(()=>{ setStatus(lp.status); },[lp.status]);
-  const isPending = status === "Pending";
+  const isPending = lpIsPrep(status);   // Open or Picking: fields and lines editable
   const [destination,setDestination]=useState(lp.destination||"");
   const [type,setType]=useState(lp.type||"Outbound");
   const [customerId,setCustomerId]=useState(lp.customer_id||"");
@@ -2672,12 +2682,13 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   async function changeStatus(next){
     // Shipping alert: an outbound LP can ship short, but never silently.
     let meta={};
-    if(next==="Shipped"&&type==="Outbound"&&shortLines.length>0){
+    const leavingTGO=lpIsPrep(status)&&(next==="Sent to Fabricator"||next==="Shipped");
+    if(leavingTGO&&type==="Outbound"&&shortLines.length>0){
       const lines=shortLines.map(it=>`• ${it.partId}: picked ${pickedOf(it)} of ${it.qty} (${it.qty-pickedOf(it)} short)`).join("\n");
       if(!window.confirm(`⚠ This license plate is SHORT.\n\n${lines}\n\nShip anyway?`)) return;
       meta={shipped_short:shortLines.map(it=>({partId:it.partId,ordered:it.qty,picked:pickedOf(it),short:it.qty-pickedOf(it)}))};
     }
-    if(next==="Shipped"&&directOpen.length>0){
+    if(next==="Shipped"&&directOpen.length>0&&!lpAtFabricator(status)){
       const lines=directOpen.map(it=>`• ${it.partId} x${it.qty}${it.supplier?` (${it.supplier})`:""}`).join("\n");
       if(!window.confirm(`⚠ These direct-ship items are not checked off as received/packed:\n\n${lines}\n\nShip anyway?`)) return;
       meta={...meta,shipped_with_direct_open:directOpen.map(it=>it.partId)};
@@ -2686,8 +2697,11 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
       const hasPicks=items.some(it=>pickedOf(it)>0&&!it.no_stock&&!isDirect(it));
       if(!window.confirm(hasPicks?"Cancel this license plate? Everything picked into it will be returned to inventory.":"Cancel this license plate?")) return;
     }
-    if(next==="Pending"&&status==="Cancelled"&&!window.confirm("Reopen this license plate? Its parts went back to stock and will need to be picked again.")) return;
-    if(next==="Pending"&&status==="Shipped"&&!window.confirm("Move this license plate back to Pending? Only do this if it did not actually ship.")) return;
+    if(next==="Open"&&status==="Cancelled"&&!window.confirm("Reopen this license plate? Its parts went back to stock and will need to be picked again.")) return;
+    if(next==="Sent to Fabricator"&&lpIsPrep(status)&&!fabricatorId&&!lp.fabricator_id&&!window.confirm("No fabricator is assigned, so no fabricator will see this license plate. Send anyway?")) return;
+    if((next==="Open"&&!lpIsPrep(status)&&status!=="Cancelled")||(next==="Sent to Fabricator"&&status==="Shipped")||(next==="Shipped"&&status==="Delivered"))
+      if(!window.confirm(`Move this license plate back to ${next}? Only do this if the last step was a mistake.`)) return;
+    if(next==="Shipped"&&lpAtFabricator(status)&&status!=="Received"&&!window.confirm(status==="Received with issues"?"The fabricator reported a problem that is still open. Mark Shipped to the customer anyway?":"The fabricator hasn't checked off every item. Mark Shipped to the customer anyway?")) return;
     setBusy(true);
     if(!(await flushItems())){ setBusy(false); return; }
     setSaveState({s:"saving",err:""});
@@ -2721,7 +2735,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         <BarcodeDisplay code={lp.id} size="lg"/>
         <div style={{display:"flex",gap:8}}>
           <Badge color={type==="Outbound"?"red":"navy"}>{type}</Badge>
-          <Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[status]||"gray"}>{status}</Badge>
+          <Badge color={lpStatusColor(status)}>{status}</Badge>
           {isPending&&<Badge color="green">✏️ Editable</Badge>}
         </div>
         {lp.order_id&&onOpenOrder&&<button onClick={async()=>{ if(!(await flushItems())) return; onClose(); onOpenOrder(lp.order_id); }}
@@ -2732,18 +2746,24 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
       {/* Status actions */}
       <div style={{display:"grid",gap:6}}>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {status==="Pending"&&<>
-            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Shipped")} style={{...wide,flex:"2 1 180px"}}>🚚 Mark Shipped</Btn>
+          {lpIsPrep(status)&&<>
+            <Btn variant={fabricatorId?"navy":"outline"} disabled={busy} onClick={()=>changeStatus("Sent to Fabricator")} style={{...wide,flex:"2 1 180px"}}>🏭 Send to Fabricator</Btn>
+            <Btn variant={fabricatorId?"outline":"navy"} disabled={busy} onClick={()=>changeStatus("Shipped")} style={wide}>🚚 Ship to Customer</Btn>
             <Btn variant="danger" disabled={busy} onClick={()=>changeStatus("Cancelled")} style={wide}>Cancel LP</Btn>
           </>}
-          {status==="Shipped"&&<>
-            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Received")} style={{...wide,flex:"2 1 180px"}}>✓ Mark Received</Btn>
-            <Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Pending")} style={wide}>Back to Pending</Btn>
+          {lpAtFabricator(status)&&<>
+            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Shipped")} style={{...wide,flex:"2 1 180px"}}>🚚 Mark Shipped to Customer</Btn>
+            <Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Open")} style={wide}>Back to Open</Btn>
           </>}
-          {status==="Received"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Shipped")} style={wide}>Back to Shipped</Btn>}
-          {status==="Cancelled"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Pending")} style={wide}>Reopen as Pending</Btn>}
+          {status==="Shipped"&&<>
+            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Delivered")} style={{...wide,flex:"2 1 180px"}}>✓ Mark Delivered</Btn>
+            <Btn variant="outline" disabled={busy} onClick={()=>changeStatus(lp.fabricator_id||fabricatorId?"Sent to Fabricator":"Open")} style={wide}>Undo Shipped</Btn>
+          </>}
+          {status==="Delivered"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Shipped")} style={wide}>Undo Delivered</Btn>}
+          {status==="Cancelled"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Open")} style={wide}>Reopen as Open</Btn>}
         </div>
-        {status==="Pending"&&type==="Outbound"&&shortLines.length>0&&<div style={{fontSize:12,color:C.warnText}}>{shortLines.length} line{shortLines.length>1?"s":""} not fully picked. You will be asked to confirm before shipping short.</div>}
+        {lpAtFabricator(status)&&<div style={{fontSize:12,color:C.textMid}}>Received updates on its own as the fabricator checks items off. The fabricator can also mark Shipped from their screen.</div>}
+        {isPending&&type==="Outbound"&&shortLines.length>0&&<div style={{fontSize:12,color:C.warnText}}>{shortLines.length} line{shortLines.length>1?"s":""} not fully picked. You will be asked to confirm before shipping short.</div>}
         {saveNote&&<div style={{fontSize:12,fontWeight:600,color:saveNote[1]}}>{saveNote[0]}</div>}
       </div>
 
@@ -2846,7 +2866,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
             </select>
           </div>
         </div>}
-        {lp.status==="Shipped"&&shortLines.length>0&&type==="Outbound"&&(
+        {!lpIsPrep(lp.status)&&lp.status!=="Cancelled"&&shortLines.length>0&&type==="Outbound"&&(
           <div style={{background:"#FFF0F2",border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"8px 12px",marginBottom:8,fontSize:12,color:C.red,fontWeight:700}}>
             ⚠ Shipped short — {shortLines.map(it=>`${it.partId} (${it.qty-pickedOf(it)} short)`).join(", ")}
           </div>
@@ -3575,7 +3595,7 @@ function OrderLpPanel({ order, lps, actions, disabled, packingCount=0, onOpenLp 
       setMsg({ok:true,text:`Created ${r.id}: ${r.lines} lines${r.direct?` (${r.direct} ship direct from supplier)`:""}.${r.skipped.length?` Skipped unknown parts: ${[...new Set(r.skipped)].join(", ")}.`:""}`});
     }catch(e){ setMsg({ok:false,text:e.message||String(e)}); }
   }
-  const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
+  const sc=lpStatusColor;
   const small={minHeight:36,padding:"0 12px",borderRadius:6,fontSize:12,fontWeight:700,cursor:"pointer"};
   return <div style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,background:C.white,display:"grid",gap:8}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -3585,7 +3605,7 @@ function OrderLpPanel({ order, lps, actions, disabled, packingCount=0, onOpenLp 
       </div>
       <Btn variant={mine.length>0?"outline":"primary"} disabled={busy||disabled} onClick={()=>run(create)}>{busy?"Creating…":mine.length>0?"Create another LP":"Create LP from order"}</Btn>
     </div>
-    {mine.map(l=>{ const pr=lpPickProgress(l.items); const canPick=l.status==="Pending"&&(l.type||"Outbound")==="Outbound"&&pr.qty>0;
+    {mine.map(l=>{ const pr=lpPickProgress(l.items); const canPick=lpIsPrep(l.status)&&(l.type||"Outbound")==="Outbound"&&pr.qty>0;
       return <div key={l.id} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderTop:`1px solid ${C.border}`,paddingTop:8}}>
         <span style={{fontFamily:"monospace",fontWeight:800,fontSize:13,color:C.navy}}>{l.id}</span>
         <Badge color={sc(l.status)}>{l.status}</Badge>
@@ -3676,7 +3696,7 @@ function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, ma
                 ? <Badge color="gray">{ml.length} line(s) · {ml.filter(l=>l.status==="Open").length} open</Badge>
                 : Object.entries(byStatus).map(([s,n])=><Badge key={s} color={lineStatusColor(s)}>{n} × {s}</Badge>)}
               {!isMaint&&vl.length===0&&<Badge color="amber">No vessels yet</Badge>}
-              {lps.filter(l=>l.order_id===o.id).map(l=>{const pr=lpPickProgress(l.items);return <Badge key={l.id} color={({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"})[l.status]||"gray"}>🏷️ {l.id}{l.status==="Pending"&&pr.qty?` · ${pr.picked}/${pr.qty}`:` · ${l.status}`}</Badge>;})}
+              {lps.filter(l=>l.order_id===o.id).map(l=>{const pr=lpPickProgress(l.items);return <Badge key={l.id} color={lpStatusColor(l.status)}>🏷️ {l.id}{lpIsPrep(l.status)&&pr.qty?` · ${pr.picked}/${pr.qty}`:` · ${l.status}`}</Badge>;})}
             </div>
           </div>
         </div>;
@@ -4539,6 +4559,19 @@ function FabricatorApp({ user, onSignOut }) {
   useEffect(()=>{ loadList(); },[]);
   useEffect(()=>{ if(openId) loadLp(openId); else setLp(null); },[openId]);
 
+  async function setLpStatus(next){
+    const items=lp.items||[]; const done=items.filter(i=>i.checked).length; const open=items.filter(i=>i.issue&&!i.issue.resolved_at).length;
+    if(next==="Shipped"){
+      const warn=open?`${open} problem(s) are still open. `:"";
+      const left=items.length-done; const w2=left?`${left} item(s) are not checked off. `:"";
+      if(!window.confirm(`${warn}${w2}Mark ${lp.id} as shipped to the customer?`)) return;
+    } else if(!window.confirm("Undo Shipped for this shipment?")) return;
+    setBusy("status");
+    const {data,error}=await _sb.rpc("fab_set_status",{p_lp:lp.id,p_status:next});
+    setBusy("");
+    if(error||!data){ window.alert(error?.message||"Could not change the status. Check your connection and try again."); return; }
+    await loadLp(lp.id);
+  }
   async function toggle(it){
     setBusy(it.key);
     const {data,error}=await _sb.rpc("fab_set_checked",{p_lp:lp.id,p_key:it.key,p_checked:!it.checked});
@@ -4561,7 +4594,10 @@ function FabricatorApp({ user, onSignOut }) {
       <h2 style={{margin:"0 0 4px"}}>{lp.id}</h2>
       <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
       <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden",marginTop:12}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
-      <div style={{fontSize:14,margin:"6px 0 14px"}}><b>{done}</b> of <b>{items.length}</b> checked</div>
+      <div style={{fontSize:14,margin:"6px 0 10px"}}><b>{done}</b> of <b>{items.length}</b> checked · <b>{lp.status}</b></div>
+      {lpAtFabricator(lp.status)&&<button onClick={()=>setLpStatus("Shipped")} disabled={busy==="status"} style={{width:"100%",minHeight:48,marginBottom:14,borderRadius:10,border:"none",background:"#1c2b3a",color:"#fff",fontSize:16,fontWeight:800}}>🚚 Mark Shipped to Customer</button>}
+      {lp.status==="Shipped"&&<div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,padding:"10px 12px",borderRadius:10,background:"#eef2f6",fontSize:14}}>🚚 Shipped to the customer<button onClick={()=>setLpStatus("Sent to Fabricator")} disabled={busy==="status"} style={{marginLeft:"auto",padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Undo</button></div>}
+      {lp.status==="Delivered"&&<div style={{marginBottom:14,padding:"10px 12px",borderRadius:10,background:"#f1faf4",fontSize:14,color:"#2e7d4f"}}>✓ Delivered to the customer</div>}
       {err&&<p style={{color:"#b00020"}}>{err}</p>}
       {groups.map(g=><div key={g.g} style={{marginBottom:18}}>
         <div style={{fontWeight:800,fontSize:15,margin:"6px 0",textTransform:"uppercase",letterSpacing:.5}}>{g.g}</div>
@@ -4598,7 +4634,7 @@ function FabricatorApp({ user, onSignOut }) {
       list.map(l=><button key={l.id} onClick={()=>setOpenId(l.id)} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:"2px solid #c9d6e2",borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit"}}>
         <div style={{fontWeight:800,fontSize:16}}>{l.id}</div>
         <div style={{fontSize:13,color:"#445"}}>{l.destination}{l.po_number?` · PO ${l.po_number}`:""}</div>
-        <div style={{fontSize:13,marginTop:4}}><b>{l.checked}</b> of <b>{l.total}</b> checked{l.issues>0?<span style={{color:"#b00020"}}> · ⚠ {l.issues} problem{l.issues>1?"s":""}</span>:null}</div>
+        <div style={{fontSize:13,marginTop:4}}><b>{l.status}</b> · <b>{l.checked}</b> of <b>{l.total}</b> checked{l.issues>0?<span style={{color:"#b00020"}}> · ⚠ {l.issues} problem{l.issues>1?"s":""}</span>:null}</div>
       </button>)}
     <div style={{fontSize:12,color:"#889",marginTop:16}}>Signed in as {user?.email}</div>
   </div>;
