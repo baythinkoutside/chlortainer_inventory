@@ -3508,7 +3508,7 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
   const count=(u)=>recs.filter(r=>r.urgency===u&&(r.firm_order_qty>0||r.flags.includes("expedite_open_po"))).length;
   const attention=recs.filter(r=>r.flags.some(f=>flagColor(f)==="red")).length;
   const supplierOf=(id)=>suppliers.find(s=>s.id===id);
-  const hasDemandData=orderLines.length>0||maintLines.length>0||procurement.length>0;
+  const hasDemandData=orderLines.length>0||maintLines.length>0||procurement.length>0||recs.length>0;   // min-stock items count too
 
   const shownRecs=recs.filter(r=>(showTentative||r.firm_order_qty>0||r.flags.includes("expedite_open_po")||r.flags.includes("shortage_but_do_not_reorder"))
     && (filter==="all"||r.urgency===filter));
@@ -3740,8 +3740,26 @@ function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions 
 // ═══ REPLENISHMENT UI END ═════════════════════════════════════════════════════
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
+const TAB_META={
+  scan:{label:"Scan",icon:"📷"}, inventory:{label:"Inventory",icon:"📦"}, parts:{label:"Parts Catalog",icon:"🔩"}, binlabels:{label:"Bin Labels",icon:"🖨️"},
+  orders:{label:"Orders",icon:"📑"}, lp:{label:"License Plates",icon:"🏷️"}, controllists:{label:"Control Lists",icon:"🧾"}, customers:{label:"Customers",icon:"🏢"},
+  replenish:{label:"Replenishment",icon:"📈"}, pos:{label:"Purchase Orders",icon:"🛒"}, suppliers:{label:"Suppliers",icon:"🏭"},
+  audit:{label:"Audit Log",icon:"📋"}, users:{label:"Users",icon:"👥"},
+};
+function useIsPhone(){
+  const q="(max-width: 719px)";
+  const [m,setM]=useState(()=>typeof window!=="undefined"&&!!window.matchMedia?.(q).matches);
+  useEffect(()=>{ const mq=window.matchMedia?.(q); if(!mq) return; const f=e=>setM(e.matches); mq.addEventListener?.("change",f); return ()=>mq.removeEventListener?.("change",f); },[]);
+  return m;
+}
 function MainApp({ user, onSignOut }) {
-  const [tab,setTab]=useState("scan");
+  // The open tab lives in the URL (#lp, #orders…) so refresh keeps your place and Back works.
+  const [tab,setTabRaw]=useState(()=>{ const h=(window.location.hash||"").slice(1); return TAB_META[h]?h:"scan"; });
+  const setTab=(t)=>{ if(!TAB_META[t]) return; setTabRaw(t); try{ if(window.location.hash!=="#"+t) window.history.pushState(null,"","#"+t); }catch(_){ } window.scrollTo(0,0); };
+  useEffect(()=>{ const f=()=>{ const h=(window.location.hash||"").slice(1); if(TAB_META[h]) setTabRaw(h); }; window.addEventListener("popstate",f); return ()=>window.removeEventListener("popstate",f); },[]);
+  const isPhone=useIsPhone();
+  const [menuOpen,setMenuOpen]=useState(false);
+  const lastTabRef=useRef({});
   const [lpFocus,setLpFocus]=useState(null);       // {id, pick} — open an LP from another tab
   const [orderFocus,setOrderFocus]=useState(null); // {id} — open an order from another tab
   const openLp=(id,pick=false)=>{ setLpFocus({id,pick}); setTab("lp"); };
@@ -3752,62 +3770,85 @@ function MainApp({ user, onSignOut }) {
   const replen=useReplenishmentForecast({parts,procurement,controlLines,packingSlipTypes,purchaseOrders,poLines,kitLines,orderLines,maintLines,orders});
   const alerts=replen.toOrderNow;   // parts to order now: same count as Replenishment's Late + Order soon
   const [isAdmin,setIsAdmin]=useState(user?.app_metadata?.role==="admin");
+  useEffect(()=>{ if(tab==="users"&&!isAdmin) setTabRaw("scan"); },[tab,isAdmin]);   // #users link opened by a non-admin
   useEffect(()=>{ // re-read from server so admin changes apply without signing out
     _sb.auth.getUser().then(({data})=>{ if(data?.user) setIsAdmin(data.user.app_metadata?.role==="admin"); });
   },[]);
-  const tabs=[
-    {id:"scan",label:"Scan",icon:"📷"},
-    {id:"parts",label:"Parts Catalog",icon:"🔩"},
-    {id:"suppliers",label:"Suppliers",icon:"🏭"},
-    {id:"customers",label:"Customers",icon:"🏢"},
-    {id:"inventory",label:"Inventory",icon:"📦"},
-    {id:"lp",label:"License Plates",icon:"🏷️"},
-    {id:"binlabels",label:"Bin Labels",icon:"🖨️"},
-    {id:"orders",label:"Orders",icon:"📑"},
-    {id:"controllists",label:"Control Lists",icon:"🧾"},
-    {id:"replenish",label:"Replenishment",icon:"📈"},
-    {id:"pos",label:"Purchase Orders",icon:"🛒"},
-    {id:"audit",label:"Audit Log",icon:"📋"},
-    ...(isAdmin?[{id:"users",label:"Users",icon:"👥"}]:[]),
+  // ── Navigation: 4 sections, each with its own tabs. Phones get a bottom bar. ──
+  const SECTIONS=[
+    {id:"warehouse",label:"Warehouse",icon:"📦",tabs:["scan","inventory","parts","binlabels"]},
+    {id:"shipping",label:"Orders",full:"Orders & Shipping",icon:"🚚",tabs:["orders","lp","controllists","customers"]},
+    {id:"purchasing",label:"Purchasing",icon:"🛒",tabs:["replenish","pos","suppliers"]},
+    {id:"admin",label:isAdmin?"Admin":"Activity",icon:isAdmin?"⚙️":"📋",tabs:["audit",...(isAdmin?["users"]:[])]},
   ];
+  const sectionOf=t=>SECTIONS.find(s=>s.tabs.includes(t))||SECTIONS[0];
+  const section=sectionOf(tab);
+  lastTabRef.current[section.id]=tab;
+  const lpProblems=lps.filter(l=>l.status!=="Cancelled"&&(l.items||[]).some(i=>i.issue&&!i.issue.resolved_at)).length;
+  const tabBadge={replenish:alerts?{n:alerts,bg:C.amber,fg:C.navy}:null, lp:lpProblems?{n:lpProblems,bg:C.red,fg:"#fff"}:null};
+  const sectionBadge=s=>{ const b=s.tabs.map(t=>tabBadge[t]).filter(Boolean); return b.length?{n:b.reduce((a,x)=>a+x.n,0),bg:b.some(x=>x.bg===C.red)?C.red:C.amber,fg:b.some(x=>x.bg===C.red)?"#fff":C.navy}:null; };
+  const pill=b=>b?<span style={{background:b.bg,color:b.fg,borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:800,lineHeight:"14px"}}>{b.n}</span>:null;
+  const goSection=s=>setTab(lastTabRef.current[s.id]&&s.tabs.includes(lastTabRef.current[s.id])?lastTabRef.current[s.id]:s.tabs[0]);
+  const subTabs=section.tabs.length>1&&<div style={{display:"flex",gap:isPhone?6:0,overflowX:"auto",WebkitOverflowScrolling:"touch",...(isPhone?{padding:"8px 12px",background:C.white,borderBottom:`1px solid ${C.border}`}:{})}}>
+    {section.tabs.map(id=>{ const t=TAB_META[id]; const on=tab===id;
+      return isPhone
+        ? <button key={id} onClick={()=>setTab(id)} style={{flexShrink:0,minHeight:36,padding:"0 12px",borderRadius:18,border:`1.5px solid ${on?C.navy:C.border}`,background:on?C.navy:C.white,color:on?"#fff":C.navy,fontSize:13,fontWeight:700,display:"flex",alignItems:"center",gap:5,cursor:"pointer",whiteSpace:"nowrap"}}>{t.icon} {t.label}{pill(tabBadge[id])}</button>
+        : <button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",padding:"11px 16px",fontSize:12,fontWeight:700,
+            color:on?C.amber:"#8A9BB0",borderBottom:on?`3px solid ${C.amber}`:"3px solid transparent",display:"flex",alignItems:"center",gap:5,whiteSpace:"nowrap",letterSpacing:.2}}>{t.icon} {t.label}{pill(tabBadge[id])}</button>; })}
+  </div>;
+  const accountMenu=<div style={{position:"relative"}}>
+    <button onClick={()=>setMenuOpen(v=>!v)} aria-label="Account" style={{background:"rgba(255,255,255,.08)",border:"1px solid rgba(255,255,255,.2)",color:"#fff",borderRadius:18,minHeight:36,padding:"0 12px",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:6,maxWidth:isPhone?44:220}}>
+      <span>👤</span>{!isPhone&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:C.amber}}>{user?.email}</span>}
+    </button>
+    {menuOpen&&<>
+      <div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,zIndex:950}}/>
+      <div style={{position:"absolute",right:0,top:"calc(100% + 6px)",zIndex:951,background:C.white,borderRadius:8,boxShadow:"0 12px 32px rgba(0,0,0,.25)",minWidth:230,overflow:"hidden",border:`1px solid ${C.border}`}}>
+        <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{fontSize:11,color:C.textLight}}>Signed in as</div>
+          <div style={{fontSize:13,fontWeight:700,color:C.navy,overflowWrap:"anywhere"}}>{user?.email}</div>
+          <div style={{fontSize:11,color:C.textLight,marginTop:2}}>{isAdmin?"Administrator":"Staff"} · {loading?"Syncing…":"🟢 Live"}</div>
+        </div>
+        <button onClick={()=>{setMenuOpen(false);onSignOut();}} style={{display:"block",width:"100%",textAlign:"left",padding:"12px 14px",minHeight:44,background:"none",border:"none",fontSize:14,fontWeight:600,color:C.navy,cursor:"pointer"}}>Sign out</button>
+        {isAdmin&&<button onClick={()=>{ setMenuOpen(false);
+            if(window.confirm("Disconnect this device from the database?\n\nThe app will ask for the Supabase URL and key again. Only do this to switch databases."))
+              { clearConfig(); window.location.reload(); } }}
+          style={{display:"block",width:"100%",textAlign:"left",padding:"12px 14px",minHeight:44,background:"none",border:"none",borderTop:`1px solid ${C.border}`,fontSize:13,color:C.red,cursor:"pointer"}}>⚙ Disconnect database…</button>}
+      </div>
+    </>}
+  </div>;
   return (
     <div style={{minHeight:"100vh",background:C.offWhite}}>
-      <div style={{background:C.navy,borderBottom:`4px solid ${C.amber}`}}>
-        <div style={{maxWidth:960,margin:"0 auto",padding:"0 20px"}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 0",borderBottom:`1px solid rgba(255,255,255,.1)`}}>
-            <div style={{display:"flex",alignItems:"center"}}>
-              <div style={{background:C.amber,width:5,height:36,borderRadius:2,marginRight:10}}/>
-              <div><div style={{fontSize:20,fontWeight:900,color:C.white,letterSpacing:-.3,lineHeight:1.1}}>ChlorTainer</div>
-                <div style={{fontSize:10,fontWeight:700,color:C.amber,letterSpacing:2.5,textTransform:"uppercase"}}>Inventory System</div></div>
+      <div style={{background:C.navy,borderBottom:`4px solid ${C.amber}`,position:isPhone?"sticky":"static",top:0,zIndex:900}}>
+        <div style={{maxWidth:960,margin:"0 auto",padding:isPhone?"0 12px":"0 20px"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:isPhone?"8px 0":"14px 0",borderBottom:isPhone?"none":`1px solid rgba(255,255,255,.1)`}}>
+            <div style={{display:"flex",alignItems:"center",minWidth:0}}>
+              <div style={{background:C.amber,width:5,height:isPhone?28:36,borderRadius:2,marginRight:10,flexShrink:0}}/>
+              <div style={{minWidth:0}}><div style={{fontSize:isPhone?17:20,fontWeight:900,color:C.white,letterSpacing:-.3,lineHeight:1.1}}>ChlorTainer</div>
+                <div style={{fontSize:isPhone?9:10,fontWeight:700,color:C.amber,letterSpacing:2.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{isPhone?(TAB_META[tab]?.label||"Inventory"):"Inventory System"}</div></div>
             </div>
-            <div style={{display:"flex",alignItems:"center",gap:12}}>
-              {loading?<span style={{fontSize:11,color:C.textLight}}>Syncing…</span>
-                :<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.greenText,background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:12,padding:"3px 10px",fontWeight:700}}>🟢 Live</div>}
-              {alerts>0&&<button onClick={()=>setTab("replenish")} title="Parts to order now (Replenishment: Late + Order soon)" style={{background:C.amber,color:C.navy,border:"none",cursor:"pointer",borderRadius:20,padding:"4px 12px",fontSize:12,fontWeight:800}}>⚠ {alerts} to order</button>}
-              <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end"}}>
-                <span style={{fontSize:11,color:C.amber,fontWeight:700}}>{user?.email}</span>
-                <button onClick={onSignOut} style={{background:"none",border:"none",cursor:"pointer",fontSize:10,color:C.textLight,padding:0}}>Sign out</button>
-              </div>
-              <button onClick={()=>{clearConfig();window.location.reload();}} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:C.textLight,padding:"4px 8px"}}>⚙ DB</button>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              {!isPhone&&(loading?<span style={{fontSize:11,color:C.textLight}}>Syncing…</span>
+                :<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.greenText,background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:12,padding:"3px 10px",fontWeight:700}}>🟢 Live</div>)}
+              {alerts>0&&<button onClick={()=>setTab("replenish")} title="Parts to order now (Replenishment: Late + Order soon)" style={{background:C.amber,color:C.navy,border:"none",cursor:"pointer",borderRadius:20,minHeight:32,padding:"0 12px",fontSize:12,fontWeight:800,whiteSpace:"nowrap"}}>⚠ {alerts}{isPhone?"":" to order"}</button>}
+              {accountMenu}
             </div>
           </div>
-          <div style={{display:"flex",gap:0,overflowX:"auto"}}>
-            {tabs.map(t=>(
-              <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"none",border:"none",cursor:"pointer",padding:"12px 16px",fontSize:12,fontWeight:700,
-                color:tab===t.id?C.amber:"#8A9BB0",borderBottom:tab===t.id?`3px solid ${C.amber}`:"3px solid transparent",
-                display:"flex",alignItems:"center",gap:5,transition:"color .15s",whiteSpace:"nowrap",letterSpacing:.2}}>
-                {t.icon} {t.label}
-                {t.id==="replenish"&&alerts>0&&<span style={{background:C.amber,color:C.navy,borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:800}}>{alerts}</span>}
-              </button>
-            ))}
-          </div>
+          {!isPhone&&<>
+            <div style={{display:"flex",gap:6,padding:"10px 0 0"}}>
+              {SECTIONS.map(s=>{ const on=s.id===section.id;
+                return <button key={s.id} onClick={()=>goSection(s)} style={{border:"none",cursor:"pointer",borderRadius:"6px 6px 0 0",padding:"8px 16px",fontSize:13,fontWeight:800,letterSpacing:.2,
+                  background:on?"rgba(255,255,255,.1)":"transparent",color:on?"#fff":"#8A9BB0",display:"flex",alignItems:"center",gap:6}}>{s.icon} {s.full||s.label}{!on&&pill(sectionBadge(s))}</button>; })}
+            </div>
+            <div style={{background:"rgba(255,255,255,.06)",borderRadius:"0 6px 0 0",marginBottom:0}}>{subTabs||<div style={{height:8}}/>}</div>
+          </>}
         </div>
+        {isPhone&&subTabs}
       </div>
-      <div style={{maxWidth:960,margin:"0 auto",padding:"24px 20px"}}>
-        <div style={{fontSize:12,color:C.textLight,marginBottom:18,display:"flex",alignItems:"center",gap:6}}>
-          <span style={{color:C.amber,fontWeight:700}}>ChlorTainer</span><span>›</span>
-          <span>{tabs.find(t=>t.id===tab)?.label}</span>
-        </div>
+      <div style={{maxWidth:960,margin:"0 auto",padding:isPhone?"14px 12px calc(96px + env(safe-area-inset-bottom))":"24px 20px"}}>
+        {!isPhone&&<div style={{fontSize:12,color:C.textLight,marginBottom:18,display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:C.amber,fontWeight:700}}>{section.full||section.label}</span><span>›</span>
+          <span>{TAB_META[tab]?.label}</span>
+        </div>}
         {error&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:"14px 18px",marginBottom:16,color:C.red,fontSize:13}}>❌ {error}</div>}
         {loading?<Spinner text="Loading from Supabase…"/>
           :tab==="scan"?<ScanTab purchaseOrders={purchaseOrders} poLines={poLines} replenByPart={replen.byPart} parts={parts} suppliers={suppliers} lps={lps} mfgBarcodes={mfgBarcodes} actions={actions}/>
@@ -3825,9 +3866,19 @@ function MainApp({ user, onSignOut }) {
           :tab==="users"&&isAdmin?<UsersTab currentUserId={user?.id}/>
           :null}
       </div>
-      <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 20px",textAlign:"center",background:C.white}}>
+      {!isPhone&&<div style={{borderTop:`1px solid ${C.border}`,padding:"14px 20px",textAlign:"center",background:C.white}}>
         <span style={{fontSize:11,color:C.textLight}}>© 2026 TGO Technologies, Inc. — ChlorTainer Inventory System · Keeping Operators Safe. Protecting Our Communities.</span>
-      </div>
+      </div>}
+      {isPhone&&<nav style={{position:"fixed",left:0,right:0,bottom:0,zIndex:900,background:C.white,borderTop:`1px solid ${C.border}`,boxShadow:"0 -4px 16px rgba(28,43,58,.08)",
+          display:"grid",gridTemplateColumns:`repeat(${SECTIONS.length},minmax(0,1fr))`,paddingBottom:"env(safe-area-inset-bottom)"}}>
+        {SECTIONS.map(s=>{ const on=s.id===section.id; const b=sectionBadge(s);
+          return <button key={s.id} onClick={()=>goSection(s)} aria-current={on?"page":undefined} style={{position:"relative",minHeight:60,border:"none",background:"none",cursor:"pointer",
+            display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,color:on?C.navy:C.textLight,fontWeight:on?800:600,fontSize:11,
+            borderTop:`3px solid ${on?C.amber:"transparent"}`}}>
+            <span style={{fontSize:22,lineHeight:"24px",filter:on?"none":"grayscale(.6)",opacity:on?1:.75}}>{s.icon}</span>{s.label}
+            {b&&<span style={{position:"absolute",top:6,left:"calc(50% + 8px)",background:b.bg,color:b.fg,borderRadius:10,padding:"0 6px",fontSize:10,fontWeight:800,lineHeight:"16px"}}>{b.n}</span>}
+          </button>; })}
+      </nav>}
     </div>
   );
 }
