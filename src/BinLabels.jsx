@@ -29,12 +29,12 @@ export const LABEL_SIZES = {
     w: 2, h: 1, mode: "roll", kind: "item", desc: true,
   },
   "item125": {
-    name: '1.25" × 0.75" thermal roll — part # and barcode (small parts)',
-    w: 1.25, h: 0.75, mode: "roll", kind: "item", tiny: true,
+    name: '1.25" × 0.75" thermal roll — part #, description, barcode',
+    w: 1.25, h: 0.75, mode: "roll", kind: "item", tiny: true, desc: true,
   },
   "avery5167": {
-    name: 'Letter sheet, 1.75" × 0.5", 80 per sheet — Avery 5167 (laser)',
-    w: 1.75, h: 0.5, mode: "sheet", kind: "item", tiny: true,
+    name: 'Letter sheet, 1.75" × 0.5", 80 per sheet — Avery 5167 (laser): part #, description, barcode',
+    w: 1.75, h: 0.5, mode: "sheet", kind: "item", tiny: true, mini: true, desc: true,
     perPage: 80, cols: 4, top: 0.5, left: 0.28125, colGap: 0.3125,
   },
 };
@@ -159,6 +159,7 @@ ${pageCss}
 .item.tiny{padding:.03in .05in;gap:.01in}
 .item.tiny .pid{font-size:7.5pt;text-align:center;width:100%}
 .item.tiny .row{justify-content:center}
+.item.tiny .desc1{text-align:center}
 .item.mini{padding:.02in .03in .015in;gap:0}
 .item.mini .pid{font-size:6.5pt;letter-spacing:0}
 .item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}
