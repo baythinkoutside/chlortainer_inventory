@@ -333,7 +333,7 @@ function useData() {
       sb.from("packing_slip_types").select("*").order("sort_order"),
       sb.from("customers").select("*").order("name"),
       sb.from("vessel_models").select("*").order("name"),
-      sb.from("control_list_lines").select("*"),
+      sb.from("control_list_lines").select("*").order("line_no",{nullsFirst:false}).order("created_at"),
       sb.from("orders").select("*").order("created_at",{ascending:false}),
       sb.from("order_lines").select("*").order("created_at"),
       sb.from("maintenance_kits").select("*").order("name"),
@@ -664,8 +664,37 @@ function useData() {
     await logAudit("vessel_model_delete","vessel_model",id,{}); await fetchAll();
   }
   async function saveControlLine(l){
-    await dbRun(_sb.from("control_list_lines").upsert({vessel_model_id:l.vessel_model_id,list_type:l.list_type,part_id:l.part_id,qty_per_unit:+l.qty_per_unit},{onConflict:"vessel_model_id,list_type,part_id"}));
+    const same=controlLines.filter(c=>c.vessel_model_id===l.vessel_model_id&&c.list_type===l.list_type);
+    const lineNo=l.line_no??same.find(c=>c.part_id===l.part_id)?.line_no??(Math.max(0,...same.map(c=>+c.line_no||0))+1);
+    await dbRun(_sb.from("control_list_lines").upsert({vessel_model_id:l.vessel_model_id,list_type:l.list_type,part_id:l.part_id,qty_per_unit:+l.qty_per_unit,line_no:lineNo},{onConflict:"vessel_model_id,list_type,part_id"}));
     await logAudit("control_line_save","vessel_model",l.vessel_model_id,{list_type:l.list_type,part_id:l.part_id,qty_per_unit:+l.qty_per_unit}); await fetchAll();
+  }
+  // Import control lists. groups: [{mName, lName, modelId|null, lines:[{partId, qty, notes}]}], in file order.
+  async function importControlLists(groups,{mode="replace",newTypes=[]}={}){
+    let models=0, lines=0, removed=0;
+    for(const name of newTypes){ if(!packingSlipTypes.some(t=>t.name.toLowerCase()===name.toLowerCase())) await addPackingSlipType(name); }
+    const made=new Map();
+    for(const g of groups){
+      let modelId=g.modelId||made.get(g.mName.toLowerCase());
+      if(!modelId){
+        modelId=slugId("VM",g.mName);
+        await dbRun(_sb.from("vessel_models").upsert({id:modelId,name:g.mName.trim()}));
+        made.set(g.mName.toLowerCase(),modelId); models++;
+      }
+      if(mode==="replace"){
+        const keep=g.lines.map(l=>l.partId);
+        const {data:gone}=await _sb.from("control_list_lines").select("id,part_id").eq("vessel_model_id",modelId).eq("list_type",g.lName);
+        const del=(gone||[]).filter(r=>!keep.includes(r.part_id));
+        if(del.length){ await dbRun(_sb.from("control_list_lines").delete().in("id",del.map(r=>r.id))); removed+=del.length; }
+      }
+      const base=mode==="merge"?Math.max(0,...controlLines.filter(c=>c.vessel_model_id===modelId&&c.list_type===g.lName&&!g.lines.some(l=>l.partId===c.part_id)).map(c=>+c.line_no||0)):0;
+      const rows=g.lines.map((l,i)=>({vessel_model_id:modelId,list_type:g.lName,part_id:l.partId,qty_per_unit:+l.qty,notes:l.notes||null,line_no:base+i+1}));
+      await dbRun(_sb.from("control_list_lines").upsert(rows,{onConflict:"vessel_model_id,list_type,part_id"}));
+      lines+=rows.length;
+      await logAudit("control_list_import","vessel_model",modelId,{list_type:g.lName,mode,lines:rows.length});
+    }
+    await fetchAll();
+    return {groups:groups.length,lines,models,removed};
   }
   async function deleteControlLine(line){
     await dbRun(_sb.from("control_list_lines").delete().eq("id",line.id));
@@ -802,7 +831,7 @@ function useData() {
   return {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
-      saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
+      saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,importControlLists,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo}};
 }
@@ -3061,11 +3090,142 @@ function LineEditor({ title, subtitle, lines, parts, qtyLabel, onAdd, onQty, onR
   </div>;
 }
 
+// ─── Control List import (CSV) ───────────────────────────────────────────────
+// One row per part line: vessel_model, list_type, part, qty_per_unit, notes.
+// Row order in the file = line order on the checklist. Each vessel model + list in the
+// file is replaced as a whole (lines not in the file are removed), or merged if chosen.
+function parseCsvText(text){
+  const rows=[]; let row=[], cell="", q=false;
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    if(q){ if(ch==='"'){ if(text[i+1]==='"'){cell+='"';i++;} else q=false; } else cell+=ch; }
+    else if(ch==='"') q=true;
+    else if(ch===","){ row.push(cell); cell=""; }
+    else if(ch==="\n"||ch==="\r"){ if(ch==="\r"&&text[i+1]==="\n") i++; row.push(cell); rows.push(row); row=[]; cell=""; }
+    else cell+=ch;
+  }
+  if(cell!==""||row.length){ row.push(cell); rows.push(row); }
+  return rows.map(r=>r.map(c=>c.trim())).filter(r=>r.some(c=>c!==""));
+}
+const CL_COLUMNS=["vessel_model","list_type","part","qty_per_unit","notes"];
+function ControlListImportModal({ vesselModels, controlLines, parts, packingSlipTypes, actions, onClose }){
+  const [plan,setPlan]=useState(null);       // {rows:[...], groups:[...], newModels:[], newTypes:[]}
+  const [mode,setMode]=useState("replace");
+  const [busy,setBusy]=useState(false);
+  const [done,setDone]=useState(null);
+  const [err,setErr]=useState("");
+  const fileRef=useRef(null);
+  const norm=s=>String(s||"").trim().toLowerCase();
+
+  function analyse(text){
+    const all=parseCsvText(text);
+    if(!all.length){ setErr("The file is empty."); return; }
+    const head=all[0].map(norm);
+    const hasHeader=head.includes("vessel_model")||head.includes("part");
+    const idx=c=>{ if(!hasHeader) return CL_COLUMNS.indexOf(c); const alias={vessel_model:["vessel_model","vessel model","model"],list_type:["list_type","list type","list","packing list"],part:["part","part_id","part #","part no","sku"],qty_per_unit:["qty_per_unit","qty","quantity","qty per vessel"],notes:["notes","note"]}[c]; return head.findIndex(h=>alias.includes(h)); };
+    const col=Object.fromEntries(CL_COLUMNS.map(c=>[c,idx(c)]));
+    if(col.vessel_model<0||col.list_type<0||col.part<0||col.qty_per_unit<0){ setErr("The file needs columns vessel_model, list_type, part and qty_per_unit."); return; }
+    const data=hasHeader?all.slice(1):all;
+    const newModels=new Set(), newTypes=new Set();
+    const rows=data.map((r,i)=>{
+      const get=c=>col[c]>=0?(r[col[c]]||""):"";
+      const mName=get("vessel_model"), lName=get("list_type"), pRaw=get("part"), qRaw=get("qty_per_unit");
+      const model=vesselModels.find(m=>norm(m.name)===norm(mName)||norm(m.id)===norm(mName));
+      const type=packingSlipTypes.find(t=>norm(t.name)===norm(lName));
+      const cands=findPartsByCode(parts,pRaw);
+      const out={n:i+(hasHeader?2:1),mName,lName:type?.name||lName,pRaw,qty:+qRaw,notes:get("notes"),modelId:model?.id||null,partId:cands.length===1?cands[0].id:null,problem:""};
+      if(!mName) out.problem="No vessel model";
+      else if(!lName) out.problem="No list type";
+      else if(!pRaw) out.problem="No part";
+      else if(cands.length>1) out.problem=`"${pRaw}" matches ${cands.map(c=>c.id).join(" and ")}`;
+      else if(!cands.length) out.problem=`Part "${pRaw}" not found`;
+      else if(!(out.qty>0)) out.problem=`Quantity "${qRaw}" is not above 0`;
+      if(!out.problem){ if(!model) newModels.add(mName); if(!type) newTypes.add(lName); }
+      return out;
+    });
+    const good=rows.filter(r=>!r.problem);
+    const keyOf=r=>`${norm(r.mName)}|${norm(r.lName)}`;
+    const seen=new Set(); const dupes=[];
+    good.forEach(r=>{ const k=keyOf(r)+"|"+r.partId; if(seen.has(k)) dupes.push(r); else seen.add(k); });
+    dupes.forEach(r=>{ r.problem=`${r.partId} is listed twice in ${r.mName} · ${r.lName}`; });
+    const ok=rows.filter(r=>!r.problem);
+    const groups=[...new Map(ok.map(r=>[keyOf(r),{mName:r.mName,lName:r.lName,modelId:r.modelId}])).values()].map(g=>{
+      const lines=ok.filter(r=>keyOf(r)===`${norm(g.mName)}|${norm(g.lName)}`);
+      const existing=g.modelId?controlLines.filter(c=>c.vessel_model_id===g.modelId&&c.list_type===g.lName):[];
+      const removed=existing.filter(c=>!lines.some(l=>l.partId===c.part_id));
+      return {...g,lines,existing:existing.length,removed};
+    });
+    setPlan({rows,groups,newModels:[...newModels],newTypes:[...newTypes]}); setErr("");
+  }
+  function onFile(e){ const f=e.target.files?.[0]; e.target.value=""; if(!f) return; const rd=new FileReader(); rd.onload=ev=>analyse(String(ev.target.result||"")); rd.readAsText(f); }
+  async function run(){
+    setBusy(true); setErr("");
+    try{ const r=await actions.importControlLists(plan.groups,{mode,newTypes:plan.newTypes}); setDone(r); }
+    catch(e){ setErr(e.message||String(e)); }
+    setBusy(false);
+  }
+  function template(){
+    const ex=[CL_COLUMNS.join(","),`Dual 150,Main Parts,CT-5109,1,`,`Dual 150,Main Parts,CT-6200,2,`,`Dual 150,Loose Parts,3017,4,old number works too`];
+    const blob=new Blob([ex.join("\n")],{type:"text/csv"}); const u=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=u; a.download="chlortainer-control-lists-template.csv"; a.click(); URL.revokeObjectURL(u);
+  }
+  const bad=plan?plan.rows.filter(r=>r.problem):[];
+  const okCount=plan?plan.groups.reduce((s,g)=>s+g.lines.length,0):0;
+  const removedCount=plan&&mode==="replace"?plan.groups.reduce((s,g)=>s+g.removed.length,0):0;
+  return <Modal title="Import control lists from CSV" width={900} onClose={onClose} confirmClose={plan&&!done?"Discard this import? Nothing has been saved yet.":null}>
+    <div style={{display:"grid",gap:14}}>
+      {!plan&&!done&&<>
+        <div style={{background:C.offWhite,borderRadius:8,padding:14,fontSize:13,color:C.textMid,display:"grid",gap:8}}>
+          <div>One row per part line, in checklist order. Columns:</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{CL_COLUMNS.map(c=><span key={c} style={{background:c==="notes"?"#E8EDF2":C.amber,color:C.navy,borderRadius:4,padding:"2px 8px",fontSize:11,fontFamily:"monospace",fontWeight:700}}>{c}</span>)}</div>
+          <div style={{fontSize:12}}>Vessel models are matched by name, and new ones are created. Parts match on the CT- number, new number or old number. List types: {packingSlipTypes.map(t=>t.name).join(", ")}.</div>
+          <div><Btn variant="outline" style={{fontSize:12,padding:"5px 12px"}} onClick={template}>⬇️ Download template</Btn></div>
+        </div>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{display:"none"}} onChange={onFile}/>
+        <Btn style={{justifyContent:"center",minHeight:48}} onClick={()=>fileRef.current?.click()}>📂 Choose CSV file</Btn>
+        {err&&<div style={{color:C.red,fontSize:13}}>⚠ {err}</div>}
+      </>}
+      {plan&&!done&&<>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:13}}>
+          <Badge color="green">{okCount} lines ready</Badge>
+          {bad.length>0&&<Badge color="red">{bad.length} rows skipped</Badge>}
+          {plan.newModels.length>0&&<Badge color="blue">New models: {plan.newModels.join(", ")}</Badge>}
+          {plan.newTypes.length>0&&<Badge color="amber">New list types: {plan.newTypes.join(", ")}</Badge>}
+        </div>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",fontSize:13}}>
+          <label style={{display:"flex",gap:6,alignItems:"center"}}><input type="radio" checked={mode==="replace"} onChange={()=>setMode("replace")}/> <b>Replace</b> each list in the file (lines not in the file are removed)</label>
+          <label style={{display:"flex",gap:6,alignItems:"center"}}><input type="radio" checked={mode==="merge"} onChange={()=>setMode("merge")}/> <b>Merge</b> (add or update; keep other lines)</label>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead><tr style={{background:C.navy,color:"#fff",textAlign:"left"}}><th style={{padding:"6px 8px"}}>Vessel model</th><th style={{padding:"6px 8px"}}>List</th><th style={{padding:"6px 8px"}}>Lines in file</th><th style={{padding:"6px 8px"}}>Lines now</th><th style={{padding:"6px 8px"}}>Removed</th></tr></thead>
+          <tbody>{plan.groups.map((g,i)=><tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+            <td style={{padding:"6px 8px",fontWeight:700}}>{g.mName}{!g.modelId&&<span style={{color:C.textLight,fontWeight:400}}> (new)</span>}</td>
+            <td style={{padding:"6px 8px"}}>{g.lName}</td><td style={{padding:"6px 8px"}}>{g.lines.length}</td><td style={{padding:"6px 8px"}}>{g.existing}</td>
+            <td style={{padding:"6px 8px",color:mode==="replace"&&g.removed.length?C.red:C.textLight}}>{mode==="replace"?(g.removed.length?g.removed.map(r=>r.part_id).join(", "):"—"):"kept"}</td></tr>)}</tbody>
+        </table>
+        {bad.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:10,fontSize:12,color:C.red,maxHeight:160,overflowY:"auto"}}>
+          {bad.map(r=><div key={r.n}>Row {r.n}: {r.problem}</div>)}</div>}
+        {err&&<div style={{color:C.red,fontSize:13}}>⚠ {err}</div>}
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          <Btn variant="outline" onClick={()=>setPlan(null)}>← Choose another file</Btn>
+          <Btn disabled={busy||okCount===0} onClick={()=>{ if(removedCount&&!window.confirm(`Replace mode removes ${removedCount} line(s) that are not in the file. Continue?`)) return; run(); }}>{busy?"Importing…":`Import ${okCount} lines`}</Btn>
+        </div>
+      </>}
+      {done&&<div style={{textAlign:"center",padding:16,display:"grid",gap:10}}>
+        <div style={{fontSize:40}}>✅</div>
+        <div style={{fontWeight:800,color:C.navy}}>Control lists imported</div>
+        <div style={{fontSize:13,color:C.textMid}}>{done.lines} lines saved in {done.groups} list(s){done.models?` · ${done.models} new vessel model(s)`:""}{done.removed?` · ${done.removed} line(s) removed`:""}</div>
+        <Btn style={{justifyContent:"center"}} onClick={onClose}>Done</Btn>
+      </div>}
+    </div>
+  </Modal>;
+}
+
 function ControlListsTab({ vesselModels, controlLines, maintKits, kitLines, parts, packingSlipTypes, actions }) {
   const [view,setView]=useState("models");
   const [modelId,setModelId]=useState(null);
   const [kitId,setKitId]=useState(null);
   const [showNew,setShowNew]=useState(false);
+  const [showImport,setShowImport]=useState(false);
   const model = vesselModels.find(m=>m.id===modelId) || null;
   const kit = maintKits.find(k=>k.id===kitId) || null;
 
@@ -3081,7 +3241,11 @@ function ControlListsTab({ vesselModels, controlLines, maintKits, kitLines, part
   );
 
   return <div>
-    <SubTabs value={view} onChange={v=>{setView(v);setShowNew(false);}} items={[["models","🚢 Vessel Models"],["kits","🧰 Maintenance Kits"],["picktime","⏱ Pick Time"]]}/>
+    <div style={{display:"flex",gap:10,alignItems:"flex-start",flexWrap:"wrap",justifyContent:"space-between"}}>
+      <SubTabs value={view} onChange={v=>{setView(v);setShowNew(false);}} items={[["models","🚢 Vessel Models"],["kits","🧰 Maintenance Kits"],["picktime","⏱ Pick Time"]]}/>
+      {view==="models"&&<Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>}
+    </div>
+    {showImport&&<ControlListImportModal vesselModels={vesselModels} controlLines={controlLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowImport(false)}/>}
 
     {view==="models"&&<div style={{display:"flex",gap:18,flexWrap:"wrap",alignItems:"flex-start"}}>
       {pickList(vesselModels, m=>controlLines.filter(c=>c.vessel_model_id===m.id).length, modelId, setModelId, "New Vessel Model")}
