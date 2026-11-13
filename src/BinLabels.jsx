@@ -20,6 +20,10 @@ export const LABEL_SIZES = {
     perPage: 10, cols: 2, top: 0.5, left: 0.15625, colGap: 0.1875,
   },
   // ── Item (SKU) labels: stuck on the part or its bag ──
+  "item1x05": {
+    name: '1" × 0.5" thermal roll — part # and barcode (TGO item label)',
+    w: 1, h: 0.5, mode: "roll", kind: "item", tiny: true, mini: true,
+  },
   "item2x1": {
     name: '2" × 1" thermal roll — part #, barcode, short description',
     w: 2, h: 1, mode: "roll", kind: "item", desc: true,
@@ -52,7 +56,7 @@ function labelHtml(p, size, opts) {
   const id = esc(p.id);
   const desc = esc(p.description);
   if (size.kind === "item") {
-    return `<div class="lbl item${size.tiny ? " tiny" : ""}">
+    return `<div class="lbl item${size.tiny ? " tiny" : ""}${size.mini ? " mini" : ""}">
       <div class="row"><span class="pid">${id}</span>${size.tiny ? "" : `<span class="uom">${esc(p.uom || "EA")}</span>`}</div>
       ${size.desc ? `<div class="desc1">${desc}</div>` : ""}
       <svg class="c128 nb" data-code="${id}"></svg>
@@ -155,6 +159,8 @@ ${pageCss}
 .item.tiny{padding:.03in .05in;gap:.01in}
 .item.tiny .pid{font-size:7.5pt;text-align:center;width:100%}
 .item.tiny .row{justify-content:center}
+.item.mini{padding:.025in .02in .02in;gap:.005in}
+.item.mini .pid{font-size:6.5pt;letter-spacing:0}
 </style></head><body>
 ${body}
 <script>
@@ -179,7 +185,7 @@ async function drawCodes(html) {
       else {
         try {
           const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-          JsBarcode(el, unesc(code), { format: "CODE128", width: 2, height: 60, displayValue: !nb, fontSize: 13, textMargin: 1, margin: nb ? 12 : 0, lineColor: "#000" });
+          JsBarcode(el, unesc(code), { format: "CODE128", width: 2, height: 60, displayValue: !nb, fontSize: 13, textMargin: 1, margin: nb ? 8 : 0, lineColor: "#000" });
           const w = el.getAttribute("width"), h = el.getAttribute("height");
           if (w && h) el.setAttribute("viewBox", `0 0 ${parseFloat(w)} ${parseFloat(h)}`);
           el.removeAttribute("width"); el.removeAttribute("height");
@@ -219,7 +225,7 @@ export default function BinLabelsTab({ parts, ui }) {
   const prefs = useMemo(loadPrefs, []);
   const [kind, setKind] = useState(prefs.kind === "item" ? "item" : "bin");
   const [binKey, setBinKey] = useState(prefs.sizeKey && LABEL_SIZES[prefs.sizeKey] && kindOf(LABEL_SIZES[prefs.sizeKey]) === "bin" ? prefs.sizeKey : "avery5163");
-  const [itemKey, setItemKey] = useState(prefs.itemKey && LABEL_SIZES[prefs.itemKey] ? prefs.itemKey : "item2x1");
+  const [itemKey, setItemKey] = useState(prefs.itemKey && LABEL_SIZES[prefs.itemKey] ? prefs.itemKey : "item1x05");
   const sizeKey = kind === "item" ? itemKey : binKey;
   const setSizeKey = kind === "item" ? setItemKey : setBinKey;
   const [perUnit, setPerUnit] = useState(false);   // item labels: one per unit on hand
