@@ -561,13 +561,13 @@ function useData() {
     const lp=lps.find(l=>l.id===lpId);
     const upd={status};
     if(status==="Cancelled"&&lp?.status!=="Cancelled") upd.items=await releasePicks(lpId,lp?.items);
-    await _sb.from("license_plates").update(upd).eq("id",lpId);
+    await dbRun(_sb.from("license_plates").update(upd).eq("id",lpId));
     await logAudit("lp_status","license_plate",lpId,{from:lp?.status,to:status,...meta});
   }
   async function updateLP(lpId, changes, meta={}) {
     const lp=lps.find(l=>l.id===lpId);
     if(changes.status==="Cancelled"&&lp?.status!=="Cancelled") changes={...changes,items:await releasePicks(lpId,changes.items||lp?.items)};
-    await _sb.from("license_plates").update(changes).eq("id",lpId);
+    await dbRun(_sb.from("license_plates").update(changes).eq("id",lpId));
     await logAudit("lp_edit","license_plate",lpId,{before:{type:lp?.type,destination:lp?.destination,items:lp?.items},after:changes,...meta});
   }
   async function addMfgBarcode(partId,supplierId,barcode,description){
@@ -769,12 +769,51 @@ function useData() {
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
+// ─── Barcode decoder (shared by every camera view) ───────────────────────────
+// Returns async (canvas) => string|null. Built once per page load.
+const NATIVE_FORMATS=["code_128","code_39","ean_13","ean_8","qr_code","upc_a","upc_e","itf","codabar"];
+let _decoderPromise=null;
+function getBarcodeDecoder(){
+  if(_decoderPromise) return _decoderPromise;
+  _decoderPromise=(async()=>{
+    if("BarcodeDetector" in window){
+      try{
+        const supported=await window.BarcodeDetector.getSupportedFormats?.()||NATIVE_FORMATS;
+        const formats=NATIVE_FORMATS.filter(f=>supported.includes(f));
+        if(formats.includes("code_128")){
+          const bd=new window.BarcodeDetector({formats});
+          return async(canvas)=>{ const rs=await bd.detect(canvas); return rs.length?rs[0].rawValue.trim():null; };
+        }
+      }catch(_){}
+    }
+    try{
+      const Z=await import("@zxing/library");
+      const hints=new Map();
+      hints.set(Z.DecodeHintType.POSSIBLE_FORMATS,[Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.EAN_13,Z.BarcodeFormat.EAN_8,
+        Z.BarcodeFormat.UPC_A,Z.BarcodeFormat.UPC_E,Z.BarcodeFormat.ITF,Z.BarcodeFormat.CODABAR,Z.BarcodeFormat.QR_CODE]);
+      hints.set(Z.DecodeHintType.TRY_HARDER,true);
+      const reader=new Z.MultiFormatReader(); reader.setHints(hints);
+      return async(canvas)=>{
+        try{
+          const bmp=new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(canvas)));
+          return reader.decodeWithState(bmp).getText().trim();
+        }catch(_){ return null; }        // NotFoundException = nothing in this frame
+        finally{ reader.reset(); }
+      };
+    }catch(_){ return null; }
+  })();
+  return _decoderPromise;
+}
+
 function CameraScanner({ onScan, onClose, hint="" }) {
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const loopRef   = useRef(null);
   const lastRef   = useRef("");
+  const missRef   = useRef(0);
+  const onScanRef = useRef(onScan);
+  onScanRef.current = onScan;          // the decode loop always calls the latest handler
   const [status,   setStatus]   = useState("starting");
   const [errMsg,   setErrMsg]   = useState("");
   const [lastScan, setLastScan] = useState("");
@@ -793,7 +832,9 @@ function CameraScanner({ onScan, onClose, hint="" }) {
         if(!cancelled){
           setStatus("error");
           setErrMsg(e.name==="NotAllowedError"
-            ? "Camera denied. Go to Settings → Chrome → Camera → Allow."
+            ? (/iPhone|iPad|iPod/.test(navigator.userAgent)
+                ? "Camera blocked. Tap aA in the address bar → Website Settings → Camera → Allow, then reload."
+                : "Camera blocked. Tap the lock icon in the address bar → Permissions → Camera → Allow, then reload.")
             : "Camera error: "+e.message);
         }
         return;
@@ -816,32 +857,35 @@ function CameraScanner({ onScan, onClose, hint="" }) {
       const canvas = canvasRef.current;
       const ctx = canvas.getContext("2d",{willReadFrequently:true});
 
-      // 4. Decode loop — BarcodeDetector only (built into Android Chrome)
+      // 4. Decoder — native BarcodeDetector where it exists (Android Chrome),
+      //    otherwise ZXing (iPhone/iPad Safari, Firefox, desktop Safari).
+      const decoder = await getBarcodeDecoder();
+      if(cancelled) return;
+      if(!decoder){ setStatus("error"); setErrMsg("This browser cannot read barcodes. Type the code in the box below."); return; }
+
       async function decode(){
         if(cancelled) return;
         try {
-          // Draw frame
+          // Draw frame (scaled so ZXing stays fast on phones)
           let ok = false;
-          try { const b=await createImageBitmap(video); canvas.width=b.width; canvas.height=b.height; ctx.drawImage(b,0,0); b.close(); ok=true; } catch(_){}
-          if(!ok){ try{ canvas.width=video.videoWidth||1280; canvas.height=video.videoHeight||720; ctx.drawImage(video,0,0,canvas.width,canvas.height); ok=true; }catch(_){} }
+          const vw=video.videoWidth||1280, vh=video.videoHeight||720;
+          const scale=Math.min(1, 1280/Math.max(vw,vh));
+          canvas.width=Math.round(vw*scale); canvas.height=Math.round(vh*scale);
+          try { ctx.drawImage(video,0,0,canvas.width,canvas.height); ok=true; } catch(_){}
 
           if(ok){
             let decoded = null;
+            try { decoded = await decoder(canvas); } catch(_){}
 
-            // Native BarcodeDetector (Android Chrome 83+)
-            if("BarcodeDetector" in window){
-              try {
-                const bd = new window.BarcodeDetector({formats:["code_128","code_39","ean_13","ean_8","qr_code","upc_a","upc_e","itf","codabar"]});
-                const rs = await bd.detect(canvas);
-                if(rs.length>0) decoded = rs[0].rawValue.trim();
-              } catch(_){}
-            }
-
+            // Same code won't fire twice while it stays in view. Once it has been
+            // out of view ~1.5 s it can be scanned again (e.g. picking qty 2 one at a time).
+            if(!decoded){ missRef.current++; if(missRef.current>=6) lastRef.current=""; }
+            else missRef.current=0;
             if(decoded && decoded!==lastRef.current){
               lastRef.current = decoded;
               setLastScan(decoded);
               if(navigator.vibrate) navigator.vibrate(80);
-              onScan(decoded);
+              onScanRef.current(decoded);
             }
           }
         } catch(_){}
@@ -1041,22 +1085,222 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
 }
 
 // ─── Scan Tab ─────────────────────────────────────────────────────────────────
+// ─── Picking screen (full screen) ─────────────────────────────────────────────
+// Picks parts from the warehouse into a pending outbound license plate.
+// Lines are sorted by bin location so the list follows the walk through the racks.
+function resolvePartOnLp(parts, mfgBarcodes, items, code){
+  const c=(code||"").trim();
+  if(!c) return null;
+  const cands=findPartsByCode(parts,c);
+  if(cands.length===1) return cands[0].id;
+  if(cands.length>1){
+    const onLp=cands.filter(p=>items.find(i=>i.partId===p.id));
+    if(onLp.length===1) return onLp[0].id;
+    return {ambiguous:cands};
+  }
+  const mb=(mfgBarcodes||[]).find(b=>(b.barcode||"").trim().toUpperCase()===c.toUpperCase());
+  return mb?mb.part_id:null;
+}
+const isWarehouseLine=it=>it.source!=="direct"&&!it.no_stock;
+function lpPickProgress(items){
+  const w=(items||[]).filter(isWarehouseLine);
+  return {picked:w.reduce((s,i)=>s+Math.min(i.picked||0,i.qty),0), qty:w.reduce((s,i)=>s+i.qty,0), direct:(items||[]).filter(i=>i.source==="direct"&&!i.checked).length};
+}
+const binSortKey=l=>{ const s=(l||"").trim().toUpperCase(); return s||"￿"; };   // no location → end of list
+const isTouch=()=>typeof window!=="undefined"&&("ontouchstart" in window);
+
+function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
+  const lp=lps.find(l=>l.id===lpId);
+  const [items,setItems]=useState(lp?.items||[]);
+  useEffect(()=>{ if(lp) setItems(lp.items||[]); },[lp]);
+  const [code,setCode]=useState("");
+  const [qty,setQty]=useState(1);
+  const [cam,setCam]=useState(false);
+  const [show,setShow]=useState("remaining");
+  const [msg,setMsg]=useState(null);       // {ok, text}
+  const [busy,setBusy]=useState(false);
+  const inputRef=useRef(null);
+  const itemsRef=useRef(items); itemsRef.current=items;
+  const busyRef=useRef(false);
+  useEffect(()=>{ const prev=document.body.style.overflow; document.body.style.overflow="hidden"; return ()=>{ document.body.style.overflow=prev; }; },[]);
+
+  const bigBtn=(x={})=>({minWidth:52,minHeight:48,padding:"0 12px",borderRadius:8,border:`1.5px solid ${C.border}`,background:C.white,fontSize:15,fontWeight:800,cursor:"pointer",color:C.navy,...x});
+  const shell=(body)=><div style={{position:"fixed",inset:0,zIndex:1500,background:C.offWhite,display:"flex",flexDirection:"column"}}>{body}</div>;
+
+  if(!lp) return shell(<div style={{padding:24,textAlign:"center"}}>
+    <div style={{fontWeight:700,marginBottom:12}}>License plate {lpId} was not found.</div>
+    <Btn onClick={onClose}>Close</Btn></div>);
+
+  const pickedOf=it=>it.picked||0;
+  const rows=items.map((it,idx)=>({it,idx,p:parts.find(x=>x.id===it.partId)}));
+  const pickRows=rows.filter(r=>isWarehouseLine(r.it))
+    .sort((a,b)=>binSortKey(a.p?.location).localeCompare(binSortKey(b.p?.location))||a.it.partId.localeCompare(b.it.partId));
+  const otherRows=rows.filter(r=>!isWarehouseLine(r.it));
+  const {picked:totalPicked,qty:totalQty}=lpPickProgress(items);
+  const remaining=pickRows.filter(r=>pickedOf(r.it)<r.it.qty);
+  const shown=show==="remaining"?remaining:pickRows;
+  const canPick=lp.status==="Pending"&&(lp.type||"Outbound")==="Outbound";
+
+  function feedback(ok,text){ setMsg({ok,text}); if(!ok&&navigator.vibrate) navigator.vibrate([60,60,60]); }
+  function refocus(){ if(!isTouch()) inputRef.current?.focus(); }   // keeps a USB/Bluetooth scanner typing into the box
+
+  async function doPick(partId,n,lineIdx=null){
+    if(busyRef.current) return; busyRef.current=true; setBusy(true);
+    const before=itemsRef.current;
+    try{
+      const next=await actions.pickLpItem(lp.id,before,partId,n,lineIdx);
+      setItems(next);
+      const p=parts.find(x=>x.id===partId);
+      const ch=next.find((x,k)=>(x.picked||0)!==(before[k]?.picked||0));
+      feedback(true,`${p?.description||partId}: ${ch?.picked??"?"} of ${ch?.qty??"?"} picked`);
+    }catch(e){ feedback(false,e.message||String(e)); }
+    busyRef.current=false; setBusy(false); refocus();
+  }
+  async function doUndo(partId,lineIdx){
+    if(busyRef.current) return; busyRef.current=true; setBusy(true);
+    try{
+      const next=await actions.unpickLpItem(lp.id,itemsRef.current,partId,1,lineIdx);
+      setItems(next);
+      feedback(true,`Returned 1 × ${partId} to inventory.`);
+    }catch(e){ feedback(false,e.message||String(e)); }
+    busyRef.current=false; setBusy(false); refocus();
+  }
+  function onCode(raw){
+    const c=(raw||"").trim(); if(!c) return;
+    if(c.toUpperCase()===lp.id.toUpperCase()){ feedback(true,"That is this license plate. Now scan a part."); return; }
+    const r=resolvePartOnLp(parts,mfgBarcodes,itemsRef.current,c);
+    if(r&&r.ambiguous){ feedback(false,`"${c}" matches ${r.ambiguous.map(p=>p.id).join(" and ")}. Scan the CT- label instead.`); return; }
+    if(!r){ feedback(false,`Unknown barcode "${c}".`); return; }
+    const lines=itemsRef.current.filter(i=>i.partId===r);
+    if(!lines.length){ feedback(false,`${r} is not on this license plate. Nothing changed.`); return; }
+    if(!lines.some(isWarehouseLine)){ feedback(false,`${r} ships direct from the supplier. It is not picked here.`); return; }
+    if(!lines.some(i=>isWarehouseLine(i)&&pickedOf(i)<i.qty)){ feedback(false,`${r} is already fully picked.`); return; }
+    doPick(r,Math.max(1,+qty||1));
+  }
+
+  return shell(<>
+    {/* Header */}
+    <div style={{background:C.navy,borderBottom:`4px solid ${C.amber}`,color:"#fff",padding:"10px 14px"}}>
+      <div style={{maxWidth:720,margin:"0 auto"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={onClose} aria-label="Close picking" style={bigBtn({background:"transparent",color:"#fff",border:"1.5px solid rgba(255,255,255,.35)",fontSize:22})}>‹</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:10,fontWeight:700,color:C.amber,letterSpacing:2,textTransform:"uppercase"}}>Picking</div>
+            <div style={{fontFamily:"monospace",fontSize:18,fontWeight:800}}>{lp.id}</div>
+            <div style={{fontSize:12,color:"#C9D3DE",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{lp.destination}{lp.po_number?` · PO ${lp.po_number}`:""}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontFamily:"monospace",fontSize:22,fontWeight:800,color:C.amber}}>{totalPicked}/{totalQty}</div>
+            <div style={{fontSize:10,color:"#C9D3DE"}}>picked</div>
+          </div>
+        </div>
+        <div style={{background:"rgba(255,255,255,.15)",height:8,borderRadius:4,marginTop:8,overflow:"hidden"}}>
+          <div style={{height:"100%",width:`${totalQty?totalPicked/totalQty*100:0}%`,background:totalQty>0&&totalPicked>=totalQty?"#2e9d5b":C.amber,transition:"width .3s"}}/>
+        </div>
+      </div>
+    </div>
+
+    {/* Body */}
+    <div style={{flex:1,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
+      <div style={{maxWidth:720,margin:"0 auto",padding:14,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:12,boxSizing:"border-box"}}>
+        {!canPick
+          ? <div style={{background:C.warnBg,border:`1.5px solid ${C.warnBdr}`,borderRadius:8,padding:14,fontSize:14,color:C.warnText}}>
+              This license plate is <b>{lp.status}</b>{(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only pending outbound license plates can be picked.
+            </div>
+          : <>
+            {/* Scan bar */}
+            <div style={{background:C.white,border:`1.5px solid ${C.amber}`,borderRadius:10,padding:12,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10,...(cam?{}:{position:"sticky",top:0,zIndex:2,boxShadow:"0 4px 12px rgba(28,43,58,.08)"})}}>
+              <div style={{display:"flex",gap:8,alignItems:"stretch"}}>
+                <input ref={inputRef} autoFocus={!isTouch()} value={code} onChange={e=>setCode(e.target.value)}
+                  onKeyDown={e=>{ if(e.key==="Enter"&&code.trim()){ onCode(code); setCode(""); } }}
+                  placeholder="Scan or type part #" autoCapitalize="characters" autoCorrect="off" spellCheck={false}
+                  style={{...inputStyle,flex:1,fontFamily:"monospace",fontSize:16,minHeight:48}}/>
+                <input type="number" inputMode="numeric" min="1" value={qty} onChange={e=>setQty(e.target.value)} aria-label="Quantity per scan"
+                  style={{...inputStyle,width:64,minHeight:48,fontSize:16,textAlign:"center",fontFamily:"monospace"}}/>
+                <button onClick={()=>setCam(v=>!v)} aria-label="Camera" style={bigBtn({background:cam?C.navy:C.white,color:cam?"#fff":C.navy})}>📷</button>
+              </div>
+              <div style={{fontSize:11,color:C.textLight}}>Each scan picks <b>{Math.max(1,+qty||1)}</b>. Works with the phone camera or a USB/Bluetooth scanner.</div>
+              {cam&&<CameraScanner onScan={onCode} onClose={()=>setCam(false)} hint="Hold on the part label. Move away and back to scan the same part again."/>}
+              {msg&&<div role="status" style={{borderRadius:8,padding:"12px 14px",fontSize:15,fontWeight:700,background:msg.ok?C.greenBg:C.redLight,color:msg.ok?C.greenText:C.red,border:`1.5px solid ${msg.ok?C.greenBdr:C.redBorder}`}}>{msg.ok?"✓ ":"⚠ "}{msg.text}</div>}
+            </div>
+
+            {/* Filter */}
+            <div style={{display:"flex",gap:8}}>
+              {[["remaining",`Remaining (${remaining.length})`],["all",`All lines (${pickRows.length})`]].map(([k,l])=>
+                <button key={k} onClick={()=>setShow(k)} style={bigBtn({flex:1,minHeight:44,fontSize:13,background:show===k?C.navy:C.white,color:show===k?"#fff":C.navy,border:`1.5px solid ${C.navy}`})}>{l}</button>)}
+            </div>
+
+            {pickRows.length>0&&remaining.length===0&&<div style={{background:C.greenBg,border:`1.5px solid ${C.greenBdr}`,borderRadius:10,padding:14,display:"grid",gap:10}}>
+              <div style={{fontWeight:800,fontSize:15,color:C.greenText}}>✅ Every warehouse line is picked.</div>
+              <div style={{fontSize:13,color:C.textMid}}>Close this screen and mark the license plate Shipped from the License Plates tab.</div>
+              <Btn variant="navy" onClick={onClose} style={{justifyContent:"center",minHeight:48}}>Done</Btn>
+            </div>}
+            {pickRows.length===0&&<div style={{textAlign:"center",padding:24,color:C.textLight}}>This license plate has no warehouse lines to pick.</div>}
+
+            {/* Lines, in bin order */}
+            {shown.map(({it,idx,p})=>{
+              const done=pickedOf(it)>=it.qty, left=it.qty-pickedOf(it);
+              return <div key={idx} style={{background:done?"#F1FAF4":C.white,border:`2px solid ${done?"#6FBF8E":C.border}`,borderRadius:10,padding:12,display:"grid",gap:10}}>
+                <div style={{display:"flex",gap:12,alignItems:"flex-start"}}>
+                  <div style={{flexShrink:0,minWidth:64,textAlign:"center",background:C.navy,color:C.amber,borderRadius:8,padding:"6px 8px",fontFamily:"monospace",fontWeight:800,fontSize:14}}>
+                    <div style={{fontSize:9,color:"#C9D3DE",letterSpacing:1}}>BIN</div>{p?.location||"—"}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:800,fontSize:15,color:C.navy}}>{p?.description||it.description||"—"}</div>
+                    <div style={{fontFamily:"monospace",fontSize:12,color:C.amber,fontWeight:700}}>{it.partId} <LegacyNote p={p}/></div>
+                    {(it.list||it.box)&&<div style={{fontSize:12,color:C.textMid}}>📋 {it.list}{it.box&&it.box!==it.list?` · ${it.box}`:""}</div>}
+                  </div>
+                  {p?.image_url&&<img src={p.image_url} alt="" style={{width:56,height:56,objectFit:"cover",borderRadius:6,border:`1px solid ${C.border}`,flexShrink:0}}/>}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <div style={{flex:"1 1 90px",fontFamily:"monospace",fontSize:22,fontWeight:800,color:done?C.greenText:C.navy}}>
+                    {pickedOf(it)}<span style={{fontSize:14,color:C.textLight}}> / {it.qty} {p?.uom||""}</span>
+                    {p&&!done&&(p.stock||0)<left&&<div style={{fontSize:11,color:C.red,fontFamily:"sans-serif",fontWeight:700}}>Only {p.stock||0} in stock</div>}
+                  </div>
+                  <button disabled={busy||pickedOf(it)<=0} onClick={()=>doUndo(it.partId,idx)} style={bigBtn({opacity:pickedOf(it)<=0?.4:1})}>↩ Undo</button>
+                  <button disabled={busy||done} onClick={()=>doPick(it.partId,1,idx)} style={bigBtn({opacity:done?.4:1})}>+1</button>
+                  {left>1&&<button disabled={busy} onClick={()=>doPick(it.partId,left,idx)} style={bigBtn({background:C.navy,color:"#fff",border:"none"})}>All {left}</button>}
+                </div>
+              </div>;
+            })}
+
+            {otherRows.length>0&&<div style={{fontSize:12,color:C.textMid,background:C.white,border:`1px dashed ${C.border}`,borderRadius:8,padding:"10px 12px"}}>
+              <b>Not picked from the warehouse ({otherRows.length}):</b> {otherRows.map(r=>`${r.it.partId}${r.it.source==="direct"?" (ships direct)":" (no stock line)"}`).join(", ")}
+            </div>}
+          </>}
+      </div>
+    </div>
+  </>);
+}
+
 function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
   const [mode,setMode]=useState(null);
   const [result,setResult]=useState(null);
   const [notFound,setNotFound]=useState("");
   const [receiveQty,setReceiveQty]=useState(1);
   const [lastScanned,setLastScanned]=useState("");
-  const [shipItems,setShipItems]=useState([]);
-  const [shipDest,setShipDest]=useState("");
-  const [shipType,setShipType]=useState("Outbound");
+  const [pickLpId,setPickLpId]=useState(null);
+  const [lpMsg,setLpMsg]=useState("");
   const [toast,setToast]=useState("");
   const [saving,setSaving]=useState(false);
 
   function showToast(msg){setToast(msg);setTimeout(()=>setToast(""),3000);}
 
   const [choices,setChoices]=useState(null); // {code, list}
+  function handleLpScan(code){
+    const t=(code||"").trim().toUpperCase();
+    setLpMsg("");
+    if(!t) return;
+    const lp=lps.find(l=>l.id.toUpperCase()===t);
+    if(lp){
+      if(lp.status!=="Pending"||(lp.type||"Outbound")!=="Outbound"){ setLpMsg(`${lp.id} is ${lp.status}${(lp.type||"Outbound")!=="Outbound"?` (${lp.type})`:""}. Only pending outbound license plates can be picked.`); return; }
+      setPickLpId(lp.id); return;
+    }
+    if(findPartsByCode(parts,t).length||mfgBarcodes.some(m=>m.barcode.toUpperCase()===t)){ setLpMsg("That is a part barcode. Scan the license plate label first, or choose the license plate below."); return; }
+    setLpMsg(`No license plate found for ${t}.`);
+  }
   function handleScan(code){
+    if(mode==="pick"){ handleLpScan(code); return; }
     setNotFound(""); setChoices(null);
     const t=code.trim().toUpperCase();
     setLastScanned(code.trim());
@@ -1073,12 +1317,6 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
     setChoices(null);
     if(mode==="lookup"||mode==="receive"){
       if(part) setResult({type:"part",data:part});
-      else setNotFound(t);
-    }
-    if(mode==="ship"){
-      const lp=lps.find(l=>l.id.toUpperCase()===t);
-      if(part){if(!shipItems.find(i=>i.partId===part.id)){setShipItems(prev=>[...prev,{partId:part.id,qty:1}]);showToast(`Added ${part.id}`);}else showToast(`${part.id} already in list`);}
-      else if(lp)setResult({type:"lp",data:lp});
       else setNotFound(t);
     }
   }
@@ -1100,20 +1338,12 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
     setSaving(false);setResult(null);setReceiveQty(1);setLastScanned("");
   }
 
-  async function createShipment(){
-    if(!shipDest||shipItems.length===0)return;
-    setSaving(true);
-    const id=await actions.createLP({type:shipType,destination:shipDest,status:"Pending"},shipItems);
-    showToast(`✅ License Plate ${id} created`);
-    setSaving(false);setShipItems([]);setShipDest("");setResult(null);setMode(null);
-  }
-
-  function reset(){setMode(null);setResult(null);setNotFound("");setShipItems([]);setShipDest("");}
+  function reset(){setMode(null);setResult(null);setNotFound("");setLpMsg("");setPickLpId(null);}
 
   const modes=[
     {id:"lookup",icon:"🔍",label:"Look Up Part",desc:"Scan a SKU to view part details & stock level"},
     {id:"receive",icon:"📥",label:"Receive Stock",desc:"Scan a SKU then enter quantity received"},
-    {id:"ship",icon:"📤",label:"Create Shipment",desc:"Scan multiple SKUs to build a license plate"},
+    {id:"pick",icon:"📤",label:"Pick a License Plate",desc:"Scan the LP label, then pick its parts into the container"},
   ];
 
   return (
@@ -1192,31 +1422,28 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions }) {
       </div>}
       {mode==="receive"&&result?.type==="part"&&<ReceiveResult result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
 
-      {mode==="ship"&&<div style={{display:"grid",gap:14}}>
-        <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14}}>
-          <SectionTitle>Scanned Items ({shipItems.length})</SectionTitle>
-          {shipItems.length===0&&<div style={{textAlign:"center",padding:"20px 0",color:C.textLight,fontSize:13}}>No items yet — scan a part barcode</div>}
-          {shipItems.map((it,i)=>{const p=parts.find(x=>x.id===it.partId);return(
-            <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:i<shipItems.length-1?`1px solid ${C.border}`:"none"}}>
-              <div style={{flex:1}}><div style={{fontFamily:"monospace",fontSize:12,color:C.amber,fontWeight:700}}>{it.partId}</div><div style={{fontSize:12,color:C.textMid}}>{p?.description}</div></div>
-              <div style={{display:"flex",alignItems:"center",gap:6}}>
-                <button onClick={()=>setShipItems(prev=>prev.map((x,j)=>j===i?{...x,qty:Math.max(1,x.qty-1)}:x))} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer"}}>−</button>
-                <span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,minWidth:24,textAlign:"center"}}>{it.qty}</span>
-                <button onClick={()=>setShipItems(prev=>prev.map((x,j)=>j===i?{...x,qty:x.qty+1}:x))} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer"}}>+</button>
-                <button onClick={()=>setShipItems(prev=>prev.filter((_,j)=>j!==i))} style={{width:28,height:28,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:14}}>✕</button>
-              </div>
-            </div>
-          );})}
-        </div>
-        <CameraScanner onScan={handleScan} onClose={reset} hint="Scan parts to add to shipment"/>
-        {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
-        {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
-        {shipItems.length>0&&<div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:14,display:"grid",gap:12}}>
-          <SectionTitle>Shipment Details</SectionTitle>
-          <Sel label="Type" value={shipType} onChange={e=>setShipType(e.target.value)}><option>Outbound</option><option>Inbound</option><option>Transfer</option></Sel>
-          <Input label="Destination / Ship To" value={shipDest} onChange={e=>setShipDest(e.target.value)} placeholder="Customer or manufacturer name"/>
-          <Btn style={{width:"100%",justifyContent:"center"}} disabled={!shipDest||saving} onClick={createShipment}>{saving?"Creating…":"🏷️ Generate License Plate"}</Btn>
-        </div>}
+      {mode==="pick"&&<div style={{display:"grid",gap:12}}>
+        {!pickLpId&&<CameraScanner onScan={handleScan} onClose={reset} hint="Point at the license plate barcode (LP-…)"/>}
+        <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
+        <ManualEntry onSubmit={handleScan}/>
+        {lpMsg&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>⚠ {lpMsg}</div>}
+        {(()=>{
+          const open=lps.filter(l=>l.status==="Pending"&&(l.type||"Outbound")==="Outbound");
+          return <div style={{display:"grid",gap:8}}>
+            <SectionTitle>Ready to pick ({open.length})</SectionTitle>
+            {open.length===0&&<div style={{textAlign:"center",padding:16,color:C.textLight,fontSize:13}}>No pending outbound license plates. Create one from an order first.</div>}
+            {open.map(l=>{ const pr=lpPickProgress(l.items); const pct=pr.qty?pr.picked/pr.qty:0;
+              return <button key={l.id} onClick={()=>setPickLpId(l.id)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:10,padding:"12px 14px",textAlign:"left",cursor:"pointer",display:"grid",gap:6,minHeight:56}}>
+                <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"baseline"}}>
+                  <span style={{fontFamily:"monospace",fontWeight:800,fontSize:14,color:C.navy}}>{l.id}</span>
+                  <span style={{fontFamily:"monospace",fontWeight:800,fontSize:14,color:pr.qty&&pr.picked>=pr.qty?C.greenText:C.amber}}>{pr.picked}/{pr.qty}</span>
+                </div>
+                <div style={{fontSize:12,color:C.textMid}}>{l.destination}{l.po_number?` · PO ${l.po_number}`:""}{pr.direct?` · ${pr.direct} direct-ship open`:""}</div>
+                <div style={{background:C.border,height:6,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${pct*100}%`,background:pct>=1?C.greenText:C.amber}}/></div>
+              </button>; })}
+          </div>;
+        })()}
+        {pickLpId&&<PickScreen lpId={pickLpId} lps={lps} parts={parts} mfgBarcodes={mfgBarcodes} actions={actions} onClose={()=>setPickLpId(null)}/>}
       </div>}
     </div>
   );
@@ -1901,6 +2128,7 @@ function InventoryTab({ parts, suppliers }) {
 function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes, mfgBarcodes, actions }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
+  const [pickId,setPickId]=useState(null);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
   return <div>
     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:18}}><Btn onClick={()=>setShowCreate(true)}>+ Create License Plate</Btn></div>
@@ -1936,7 +2164,8 @@ function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes
       {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
     </div>
     {showCreate&&<CreateLpModal parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal fabricators={fabricators} lp={viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)}/>}
+    {viewLp&&<LpDetailModal fabricators={fabricators} lp={lps.find(l=>l.id===viewLp.id)||viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)} onStartPick={id=>{setViewLp(null);setPickId(id);}}/>}
+    {pickId&&<PickScreen lpId={pickId} lps={lps} parts={parts} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setPickId(null)}/>}
   </div>;
 }
 
@@ -2011,9 +2240,12 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
-function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose }) {
-  const isPending = lp.status === "Pending";
+function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose, onStartPick }) {
+  // Every change saves as soon as it is made (text fields when you leave the box,
+  // quantities ~0.7 s after the last change). Status changes use the buttons at the top.
   const [status,setStatus]=useState(lp.status);
+  useEffect(()=>{ setStatus(lp.status); },[lp.status]);
+  const isPending = status === "Pending";
   const [destination,setDestination]=useState(lp.destination||"");
   const [type,setType]=useState(lp.type||"Outbound");
   const [customerId,setCustomerId]=useState(lp.customer_id||"");
@@ -2022,16 +2254,37 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   const [poNumber,setPoNumber]=useState(lp.po_number||"");
   const customer=customers?.find(c=>c.id===(customerId||lp.customer_id));
   const [items,setItems]=useState(lp.items||[]);
+  const itemsRef=useRef(items); itemsRef.current=items;
+  const itemsTimer=useRef(null);
+  // Follow picks / check-offs made elsewhere (picking screen, fabricator) unless a local edit is waiting to save.
+  useEffect(()=>{ if(!itemsTimer.current) setItems(lp.items||[]); },[lp.items]);
   const [addPartId,setAddPartId]=useState("");
   const [addQty,setAddQty]=useState(1);
-  const [saving,setSaving]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [saveState,setSaveState]=useState({s:"idle",err:""});   // idle | pending | saving | saved | error
+  async function persist(changes,meta={}){
+    setSaveState({s:"saving",err:""});
+    try{ await actions.updateLP(lp.id,changes,meta); setSaveState({s:"saved",err:""}); return true; }
+    catch(e){ setSaveState({s:"error",err:e.message||String(e)}); return false; }
+  }
+  const saveFields=(changes)=>persist(changes,{field_edit:Object.keys(changes)});
+  function queueItemsSave(next){
+    itemsRef.current=next; setItems(next);
+    clearTimeout(itemsTimer.current);
+    setSaveState({s:"pending",err:""});
+    itemsTimer.current=setTimeout(flushItems,700);
+  }
+  async function flushItems(){
+    if(!itemsTimer.current) return true;
+    clearTimeout(itemsTimer.current); itemsTimer.current=null;
+    return persist({items:itemsRef.current},{items_edit:true});
+  }
+  async function close(){ await flushItems(); onClose(); }
   const [newTypeInput,setNewTypeInput]=useState("");
   const [addingType,setAddingType]=useState(false);
 
   // ── Picking (Outbound, Pending): scanning a part moves stock into this container ──
   const canPick = isPending && type==="Outbound";
-  const [scanning,setScanning]=useState(false);
-  const [scanCode,setScanCode]=useState("");
   const [scanQty,setScanQty]=useState(1);
   const [pickMsg,setPickMsg]=useState(null);   // {ok:boolean, text:string}
   const pickedOf=it=>it.picked||0;
@@ -2042,12 +2295,14 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   const hasChecklist=items.some(it=>it.list||it.source);
   const [fabricatorId,setFabricatorId]=useState(lp.fabricator_id||"");
   async function toggleResolved(i){
+    if(!(await flushItems())) return;
     const who=(getCurrentUser()?.email||"TGO staff");
     const next=items.map((x,k)=>{ if(k!==i||!x.issue) return x; const {resolved_by,resolved_at,...rest}=x.issue; return {...x,issue:x.issue.resolved_at?rest:{...rest,resolved_by:who,resolved_at:new Date().toISOString()}}; });
     setItems(next);
     try{ await actions.updateLP(lp.id,{items:next},{issue_resolve:true}); }catch(e){ setItems(items); setPickMsg({ok:false,text:"Could not save: "+(e.message||e)}); }
   }
   async function toggleCheck(i){
+    if(!(await flushItems())) return;
     const who=(getCurrentUser()?.email||"TGO staff");
     const next=items.map((x,k)=>{ if(k!==i) return x; const {checked,checked_by,checked_at,...rest}=x; return x.checked?rest:{...rest,checked:true,checked_by:who,checked_at:new Date().toISOString()}; });
     setItems(next);
@@ -2068,6 +2323,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
     return mb?mb.part_id:null;
   }
   async function pick(code, qty=scanQty, lineIdx=null){
+    if(!(await flushItems())) return;
     const partId=resolvePart(code);
     if(partId&&partId.ambiguous){ setPickMsg({ok:false,text:`"${code}" matches ${partId.ambiguous.map(p=>p.id).join(" and ")}. Scan the full ID instead.`}); return; }
     if(!partId){ setPickMsg({ok:false,text:`Unknown barcode "${code}".`}); return; }
@@ -2080,6 +2336,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
     }catch(e){ setPickMsg({ok:false,text:e.message}); }
   }
   async function unpick(partId, lineIdx=null){
+    if(!(await flushItems())) return;
     try{
       const next=await actions.unpickLpItem(lp.id,items,partId,1,lineIdx);
       setItems(next);
@@ -2087,52 +2344,59 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
     }catch(e){ setPickMsg({ok:false,text:e.message}); }
   }
 
-  async function save(){
+  async function changeStatus(next){
     // Shipping alert: an outbound LP can ship short, but never silently.
     let meta={};
-    if(status==="Shipped"&&lp.status!=="Shipped"&&type==="Outbound"&&shortLines.length>0){
+    if(next==="Shipped"&&type==="Outbound"&&shortLines.length>0){
       const lines=shortLines.map(it=>`• ${it.partId}: picked ${pickedOf(it)} of ${it.qty} (${it.qty-pickedOf(it)} short)`).join("\n");
       if(!window.confirm(`⚠ This license plate is SHORT.\n\n${lines}\n\nShip anyway?`)) return;
       meta={shipped_short:shortLines.map(it=>({partId:it.partId,ordered:it.qty,picked:pickedOf(it),short:it.qty-pickedOf(it)}))};
     }
-    if(status==="Shipped"&&lp.status!=="Shipped"&&directOpen.length>0){
+    if(next==="Shipped"&&directOpen.length>0){
       const lines=directOpen.map(it=>`• ${it.partId} x${it.qty}${it.supplier?` (${it.supplier})`:""}`).join("\n");
       if(!window.confirm(`⚠ These direct-ship items are not checked off as received/packed:\n\n${lines}\n\nShip anyway?`)) return;
       meta={...meta,shipped_with_direct_open:directOpen.map(it=>it.partId)};
     }
-    if(status==="Cancelled"&&lp.status!=="Cancelled"&&items.some(it=>pickedOf(it)>0&&!it.no_stock&&!isDirect(it))){
-      if(!window.confirm("Cancel this license plate? Everything picked into it will be returned to inventory.")) return;
+    if(next==="Cancelled"){
+      const hasPicks=items.some(it=>pickedOf(it)>0&&!it.no_stock&&!isDirect(it));
+      if(!window.confirm(hasPicks?"Cancel this license plate? Everything picked into it will be returned to inventory.":"Cancel this license plate?")) return;
     }
-    setSaving(true);
-    try{
-      if(isPending){
-        await actions.updateLP(lp.id,{status,destination,type,items,packing_slip_type:packingSlipType||null,quote_number:quoteNumber||null,po_number:poNumber||null,customer_id:customerId||null},meta);
-      } else {
-        await actions.updateLPStatus(lp.id,status,meta);
-      }
-    }catch(e){ setPickMsg({ok:false,text:e.message}); setSaving(false); return; }
-    setSaving(false);
-    onClose();
+    if(next==="Pending"&&status==="Cancelled"&&!window.confirm("Reopen this license plate? Its parts went back to stock and will need to be picked again.")) return;
+    if(next==="Pending"&&status==="Shipped"&&!window.confirm("Move this license plate back to Pending? Only do this if it did not actually ship.")) return;
+    setBusy(true);
+    if(!(await flushItems())){ setBusy(false); return; }
+    setSaveState({s:"saving",err:""});
+    try{ await actions.updateLPStatus(lp.id,next,meta); setStatus(next); setSaveState({s:"saved",err:""}); }
+    catch(e){ setSaveState({s:"error",err:e.message||String(e)}); }
+    setBusy(false);
   }
-  async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setPackingSlipType(newTypeInput.trim());setNewTypeInput("");setAddingType(false);}
+  async function addCustomType(){if(!newTypeInput.trim())return;const n=newTypeInput.trim();await actions.addPackingSlipType(n);setPackingSlipType(n);setNewTypeInput("");setAddingType(false);saveFields({packing_slip_type:n});}
 
   function addItem(){
-    if(!addPartId||items.find(i=>i.partId===addPartId))return;
-    setItems(prev=>[...prev,{partId:addPartId,qty:+addQty||1}]);
+    const cur=itemsRef.current;
+    if(!addPartId||cur.find(i=>i.partId===addPartId))return;
+    queueItemsSave([...cur,{partId:addPartId,qty:+addQty||1}]);
     setAddPartId(""); setAddQty(1);
   }
-  function removeItem(idx){ setItems(prev=>prev.filter((it,i)=>i!==idx||pickedOf(it)>0)); }   // picked lines: undo first
-  function updateQty(idx,qty){ setItems(prev=>prev.map((it,i)=>i===idx?{...it,qty:Math.max(pickedOf(it),1,+qty||1)}:it)); }
+  function removeItem(idx){
+    const it=itemsRef.current[idx];
+    if(!it) return;
+    if(pickedOf(it)>0){ setPickMsg({ok:false,text:`Undo the picks on ${it.partId} before removing the line.`}); return; }   // picked lines: undo first
+    queueItemsSave(itemsRef.current.filter((_,i)=>i!==idx));
+  }
+  function updateQty(idx,qty){ queueItemsSave(itemsRef.current.map((it,i)=>i===idx?{...it,qty:Math.max(pickedOf(it),1,+qty||1)}:it)); }
 
   const availParts=parts.filter(p=>!items.find(i=>i.partId===p.id));
 
-  return <Modal title={lp.id} onClose={onClose}>
+  const saveNote={idle:null,pending:["Saving…",C.textLight],saving:["Saving…",C.textLight],saved:["✓ All changes saved",C.greenText],error:[`⚠ Not saved: ${saveState.err}`,C.red]}[saveState.s];
+  const wide={flex:"1 1 150px",justifyContent:"center",minHeight:44};
+  return <Modal title={lp.id} onClose={close}>
     <div style={{display:"grid",gap:18}}>
       <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"16px 0",background:C.offWhite,borderRadius:6,gap:8}}>
         <BarcodeDisplay code={lp.id} size="lg"/>
         <div style={{display:"flex",gap:8}}>
           <Badge color={type==="Outbound"?"red":"navy"}>{type}</Badge>
-          <Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[lp.status]||"gray"}>{lp.status}</Badge>
+          <Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[status]||"gray"}>{status}</Badge>
           {isPending&&<Badge color="green">✏️ Editable</Badge>}
         </div>
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
@@ -2150,22 +2414,36 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         }}>🖨️ Print License Plate</Btn>
       </div>
 
-      {/* Editable fields — only when Pending */}
+      {/* Status actions */}
+      <div style={{display:"grid",gap:6}}>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          {status==="Pending"&&<>
+            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Shipped")} style={{...wide,flex:"2 1 180px"}}>🚚 Mark Shipped</Btn>
+            <Btn variant="danger" disabled={busy} onClick={()=>changeStatus("Cancelled")} style={wide}>Cancel LP</Btn>
+          </>}
+          {status==="Shipped"&&<>
+            <Btn variant="navy" disabled={busy} onClick={()=>changeStatus("Received")} style={{...wide,flex:"2 1 180px"}}>✓ Mark Received</Btn>
+            <Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Pending")} style={wide}>Back to Pending</Btn>
+          </>}
+          {status==="Received"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Shipped")} style={wide}>Back to Shipped</Btn>}
+          {status==="Cancelled"&&<Btn variant="outline" disabled={busy} onClick={()=>changeStatus("Pending")} style={wide}>Reopen as Pending</Btn>}
+        </div>
+        {status==="Pending"&&type==="Outbound"&&shortLines.length>0&&<div style={{fontSize:12,color:C.warnText}}>{shortLines.length} line{shortLines.length>1?"s":""} not fully picked. You will be asked to confirm before shipping short.</div>}
+        {saveNote&&<div style={{fontSize:12,fontWeight:600,color:saveNote[1]}}>{saveNote[0]}</div>}
+      </div>
+
+      {/* Editable fields — only when Pending (each saves on its own) */}
       {isPending
         ? <div style={{display:"grid",gap:12}}>
-            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
-              <Sel label="Type" value={type} onChange={e=>setType(e.target.value)}>
-                <option>Outbound</option><option>Inbound</option><option>Transfer</option>
-              </Sel>
-              <Sel label="Status" value={status} onChange={e=>setStatus(e.target.value)}>
-                <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
-              </Sel>
-            </div>
+            <Sel label="Type" value={type} onChange={e=>{setType(e.target.value);saveFields({type:e.target.value});}}>
+              <option>Outbound</option><option>Inbound</option><option>Transfer</option>
+            </Sel>
             <Field label="Customer">
               <select value={customerId} onChange={e=>{
                 const c=customers?.find(x=>x.id===e.target.value);
                 setCustomerId(e.target.value);
                 if(c) setDestination(c.name);
+                saveFields(c?{customer_id:c.id,destination:c.name}:{customer_id:null});
               }} style={{...inputStyle,width:"100%"}}>
                 <option value="">Select customer…</option>
                 {(customers||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
@@ -2173,22 +2451,25 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
             </Field>
             <Field label="Destination">
               <input value={destination} onChange={e=>setDestination(e.target.value)}
+                onBlur={()=>{ if(destination!==(lp.destination||"")) saveFields({destination}); }}
                 placeholder="Customer or location name" style={{...inputStyle,width:"100%"}}/>
             </Field>
             <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
               <Field label="Quote Number">
                 <input value={quoteNumber} onChange={e=>setQuoteNumber(e.target.value)}
+                  onBlur={()=>{ if(quoteNumber!==(lp.quote_number||"")) saveFields({quote_number:quoteNumber||null}); }}
                   placeholder="e.g. 4113" style={inputStyle}/>
               </Field>
               <Field label="P.O. Number">
                 <input value={poNumber} onChange={e=>setPoNumber(e.target.value)}
+                  onBlur={()=>{ if(poNumber!==(lp.po_number||"")) saveFields({po_number:poNumber||null}); }}
                   placeholder="e.g. 26-200-02" style={inputStyle}/>
               </Field>
             </div>
             <div>
               <Field label="Packing Slip Type">
                 <div style={{display:"flex",gap:8}}>
-                  <select value={packingSlipType} onChange={e=>setPackingSlipType(e.target.value)} style={{...inputStyle,flex:1}}>
+                  <select value={packingSlipType} onChange={e=>{setPackingSlipType(e.target.value);saveFields({packing_slip_type:e.target.value||null});}} style={{...inputStyle,flex:1}}>
                     <option value="">Select type…</option>
                     {(packingSlipTypes||[]).map(t=><option key={t.id} value={t.name}>{t.name}</option>)}
                   </select>
@@ -2220,35 +2501,19 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
               {lp.quote_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>Quote Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.quote_number}</div></div>}
               {lp.po_number&&<div><div style={{fontSize:11,color:C.textLight,textTransform:"uppercase",letterSpacing:.6,marginBottom:3}}>P.O. Number</div><div style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.po_number}</div></div>}
             </div>}
-            <Sel label="Update Status" value={status} onChange={e=>setStatus(e.target.value)}>
-              <option>Pending</option><option>Shipped</option><option>Received</option><option>Cancelled</option>
-            </Sel>
           </div>
       }
 
-      {/* Save button */}
-      <Btn onClick={save} disabled={saving} style={{justifyContent:"center"}}>
-        {saving?"Saving…":"💾 Save Changes"}
-      </Btn>
-
-      {/* Pick panel — scan parts into the shipping container */}
-      {canPick&&(
+      {/* Picking happens on its own full-screen view */}
+      {canPick&&(()=>{ const pr=lpPickProgress(items); return (
         <div style={{background:"#FFF8E8",border:`1.5px solid ${C.amber}`,borderRadius:7,padding:12,display:"grid",gap:8}}>
-          <div style={{fontWeight:800,fontSize:12,color:C.navy,letterSpacing:1,textTransform:"uppercase"}}>
-            Picking · {items.reduce((a,b)=>a+pickedOf(b),0)} of {items.reduce((a,b)=>a+b.qty,0)} picked
-          </div>
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <input autoFocus value={scanCode} onChange={e=>setScanCode(e.target.value)}
-              onKeyDown={e=>{if(e.key==="Enter"&&scanCode.trim()){pick(scanCode);setScanCode("");}}}
-              placeholder="Scan or type part barcode" style={{...inputStyle,flex:1,fontFamily:"monospace"}}/>
-            <input type="number" min="1" value={scanQty} onChange={e=>setScanQty(e.target.value)} title="Quantity per scan"
-              style={{...inputStyle,width:60,fontFamily:"monospace",textAlign:"center"}}/>
-            <Btn variant="outline" onClick={()=>setScanning(true)}>📷</Btn>
-          </div>
-          {pickMsg&&<div style={{fontSize:12,fontWeight:600,color:pickMsg.ok?"#1A6B42":C.red}}>{pickMsg.ok?"✓ ":"⚠ "}{pickMsg.text}</div>}
-          {scanning&&<CameraScanner onScan={bc=>{setScanning(false);pick(bc);}} onClose={()=>setScanning(false)} hint="Scan the part barcode to add it to this shipment"/>}
-        </div>
-      )}
+          <div style={{fontWeight:800,fontSize:12,color:C.navy,letterSpacing:1,textTransform:"uppercase"}}>Picking · {pr.picked} of {pr.qty} picked</div>
+          <Btn variant="navy" style={{justifyContent:"center",minHeight:48,fontSize:15}} onClick={async()=>{
+            if(!(await flushItems())) return;
+            onStartPick?.(lp.id);
+          }}>▶ Open picking screen</Btn>
+        </div>);})()}
+      {pickMsg&&<div style={{fontSize:12,fontWeight:600,color:pickMsg.ok?"#1A6B42":C.red}}>{pickMsg.ok?"✓ ":"⚠ "}{pickMsg.text}</div>}
 
       {/* Line items — editable when Pending */}
       <div>
