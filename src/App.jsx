@@ -4220,7 +4220,7 @@ function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions 
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
 const TAB_META={
-  scan:{label:"Scan",icon:"📷"}, inventory:{label:"Inventory",icon:"📦"}, parts:{label:"Parts Catalog",icon:"🔩"}, binlabels:{label:"Bin Labels",icon:"🖨️"},
+  scan:{label:"Scan",icon:"📷"}, inventory:{label:"Inventory",icon:"📦"}, parts:{label:"Parts Catalog",icon:"🔩"}, binlabels:{label:"Labels",icon:"🖨️"},
   orders:{label:"Orders",icon:"📑"}, lp:{label:"License Plates",icon:"🏷️"}, controllists:{label:"Control Lists",icon:"🧾"}, customers:{label:"Customers",icon:"🏢"},
   replenish:{label:"Replenishment",icon:"📈"}, pos:{label:"Purchase Orders",icon:"🛒"}, suppliers:{label:"Suppliers",icon:"🏭"},
   audit:{label:"Audit Log",icon:"📋"}, users:{label:"Users",icon:"👥"},
