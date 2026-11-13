@@ -358,7 +358,7 @@ function useData() {
     setControlLines(cls||[]);
     setOrders(ords||[]);
     setOrderLines(ols||[]);
-    { const {data:opl}=await sb.from("order_packing_lines").select("*").order("created_at"); setPackingLines(opl||[]); }
+    { const {data:opl}=await sb.from("order_packing_lines").select("*").order("list_type").order("line_no",{nullsFirst:false}).order("created_at"); setPackingLines(opl||[]); }
     setMaintKits(kits||[]);
     setKitLines(kls||[]);
     setMaintLines(mls||[]);
@@ -444,7 +444,7 @@ function useData() {
   // ── Packing lists loaded from QuickBooks slips (the source for an order's LP) ──
   async function savePackingList(orderId, listType, lines, meta={}){
     await dbRun(_sb.from("order_packing_lines").delete().eq("order_id",orderId).eq("list_type",listType));
-    const rows=lines.map(l=>({order_id:orderId,list_type:listType,part_id:l.partId,qty:+l.qty,printed_no:l.no||null,printed_desc:l.desc||null,slip_date:meta.slipDate||null,source_file:meta.file||null}));
+    const rows=lines.map((l,i)=>({order_id:orderId,list_type:listType,line_no:i+1,part_id:l.partId,qty:+l.qty,printed_no:l.no||null,printed_desc:l.desc||null,slip_date:meta.slipDate||null,source_file:meta.file||null}));
     if(rows.length) await dbRun(_sb.from("order_packing_lines").insert(rows));
     await logAudit("packing_list_load","order",orderId,{list_type:listType,lines:rows.length,file:meta.file,slip_date:meta.slipDate});
     await fetchAll();
@@ -465,7 +465,7 @@ function useData() {
       if(map.has(key)){ map.get(key).qty+=q; return; }
       const links=p.suppliers||[];
       const direct=links.length>0&&links.every(x=>x.shipsDirect);
-      const it={partId,qty:q,picked:0,list,box:"",source:direct?"direct":"warehouse"};
+      const it={partId,qty:q,picked:0,list,box:"",source:direct?"direct":"warehouse",seq:map.size+1};
       if(direct){
         const sup=suppliers.find(x=>x.id===links[0].supplierId);
         it.supplier=sup?.name||links[0].supplierId; it.direct_status="To order";
@@ -486,7 +486,8 @@ function useData() {
       });
     }
     const order_of=t=>{const i=packingSlipTypes.findIndex(x=>x.name===t);return i<0?99:i;};
-    const items=[...map.values()].sort((a,b)=>order_of(a.list)-order_of(b.list)||(a.source==="direct")-(b.source==="direct")||a.partId.localeCompare(b.partId));
+    // Packing-list types in the app's order; within a list, lines stay in packing-slip order.
+    const items=[...map.values()].sort((a,b)=>order_of(a.list)-order_of(b.list)||a.seq-b.seq).map(({seq,...it})=>it);
     return {items,skipped,fromPacking:pl.length>0};
   }
   async function createLpFromOrder(orderId){
@@ -1213,7 +1214,7 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   const pickedOf=it=>it.picked||0;
   const rows=items.map((it,idx)=>({it,idx,p:parts.find(x=>x.id===it.partId)}));
   const pickRows=rows.filter(r=>isWarehouseLine(r.it))
-    .sort((a,b)=>binSortKey(a.p?.location).localeCompare(binSortKey(b.p?.location))||a.it.partId.localeCompare(b.it.partId));
+    .sort((a,b)=>binSortKey(a.p?.location).localeCompare(binSortKey(b.p?.location))||a.idx-b.idx);   // no bin yet → packing-list order
   const otherRows=rows.filter(r=>!isWarehouseLine(r.it));
   const {picked:totalPicked,qty:totalQty}=lpPickProgress(items);
   const remaining=pickRows.filter(r=>pickedOf(r.it)<r.it.qty);
@@ -2403,8 +2404,6 @@ async function printLicensePlate({ lp, items, parts, customer, packingSlipTypes=
   const listOf=it=>it.list||lp.packing_slip_type||"Items";
   const typeOrder=packingSlipTypes.map(t=>t.name);
   const rank=n=>{ const i=typeOrder.indexOf(n); return i<0?999:i; };
-  const boxNum=b=>{ const m=String(b||"").match(/(\d+)\s*$/); return m?+m[1]:0; };
-  const bin=it=>String(partOf(it.partId)?.location||"").toUpperCase()||"￿";
   const warehouse=items.map((it,i)=>({it,i})).filter(x=>!isDirect(x.it));
   const direct=items.filter(isDirect);
   const lists=[...new Set(warehouse.map(x=>listOf(x.it)))].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
@@ -2441,9 +2440,9 @@ async function printLicensePlate({ lp, items, parts, customer, packingSlipTypes=
 
   const sections=lists.map(name=>{
     const rows=warehouse.filter(x=>listOf(x.it)===name).map(x=>x.it);
-    const boxes=[...new Set(rows.map(it=>it.box&&it.box!==name?it.box:""))].sort((a,b)=>boxNum(a)-boxNum(b)||a.localeCompare(b));
+    const boxes=[...new Set(rows.map(it=>it.box&&it.box!==name?it.box:""))];   // in the order they first appear
     const body=boxes.map(bx=>{
-      const r=rows.filter(it=>(it.box&&it.box!==name?it.box:"")===bx).sort((a,b)=>bin(a).localeCompare(bin(b))||a.partId.localeCompare(b.partId));
+      const r=rows.filter(it=>(it.box&&it.box!==name?it.box:"")===bx);   // same order as the packing list
       const label=bx?bx.replace(new RegExp("^"+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*","i"),"")||bx:"";
       return `<tbody class="${r.length<=16?"keep":""}">${bx?`<tr class="boxrow"><td colspan="7">📦 ${esc(label)} <span>· ${r.length} line${r.length!==1?"s":""} · ${pcs(sumQty(r))}</span></td></tr>`:""}${r.map(row).join("")}</tbody>`;
     }).join("");
