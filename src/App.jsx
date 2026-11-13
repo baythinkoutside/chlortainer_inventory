@@ -115,14 +115,36 @@ function SectionTitle({children}){
     <span style={{fontSize:14,fontWeight:800,color:C.navy,textTransform:"uppercase",letterSpacing:.5}}>{children}</span>
   </div>;
 }
-function Modal({title,onClose,children}){
-  return <div style={{position:"fixed",inset:0,background:"rgba(28,43,58,0.72)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-    <div style={{background:C.white,borderRadius:8,width:"100%",maxWidth:620,maxHeight:"92vh",overflowY:"auto",overflowX:"hidden",boxShadow:"0 24px 64px rgba(0,0,0,.35)"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 24px",borderBottom:`3px solid ${C.amber}`,background:C.navy}}>
-        <h3 style={{margin:0,fontSize:16,fontWeight:800,color:C.white,letterSpacing:.3}}>{title}</h3>
-        <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:24,color:"#8A9BB0",lineHeight:1,padding:0}}>×</button>
+// Popups: Esc or a tap outside closes the top one; confirmClose asks first when there is unsaved input.
+// "Top" = the last popup in the page (a nested popup sits inside, and after, its parent).
+let _openModals=0;
+function Modal({title,onClose,children,width=620,confirmClose=null}){
+  const isPhone=useIsPhone();
+  const rootRef=useRef(null);
+  const downOnBackdrop=useRef(false);
+  const tryClose=()=>{ if(confirmClose&&!window.confirm(confirmClose)) return; onClose(); };
+  const closeRef=useRef(tryClose); closeRef.current=tryClose;
+  useEffect(()=>{
+    if(_openModals++===0) document.body.dataset.prevOverflow=document.body.style.overflow;
+    document.body.style.overflow="hidden";
+    const onKey=e=>{
+      if(e.key!=="Escape"||e.defaultPrevented) return;
+      const all=document.querySelectorAll("[data-modal]");
+      if(all[all.length-1]!==rootRef.current) return;
+      e.preventDefault(); closeRef.current();
+    };
+    window.addEventListener("keydown",onKey);
+    return ()=>{ window.removeEventListener("keydown",onKey); if(--_openModals===0){ document.body.style.overflow=document.body.dataset.prevOverflow||""; delete document.body.dataset.prevOverflow; } };
+  },[]);
+  return <div ref={rootRef} data-modal="" onMouseDown={e=>{downOnBackdrop.current=e.target===e.currentTarget;}} onClick={e=>{ if(downOnBackdrop.current&&e.target===e.currentTarget) tryClose(); }}
+    style={{position:"fixed",inset:0,background:"rgba(28,43,58,0.72)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:isPhone?0:16}}>
+    <div role="dialog" aria-modal="true" aria-label={typeof title==="string"?title:undefined}
+      style={{background:C.white,borderRadius:isPhone?0:8,width:"100%",maxWidth:isPhone?"100%":width,height:isPhone?"100%":"auto",maxHeight:isPhone?"100dvh":"92vh",overflowY:"auto",overflowX:"hidden",boxShadow:"0 24px 64px rgba(0,0,0,.35)",WebkitOverflowScrolling:"touch"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:isPhone?"6px 8px 6px 16px":"10px 12px 10px 24px",borderBottom:`3px solid ${C.amber}`,background:C.navy,position:"sticky",top:0,zIndex:5,paddingTop:isPhone?"calc(6px + env(safe-area-inset-top))":undefined}}>
+        <h3 style={{margin:0,fontSize:16,fontWeight:800,color:C.white,letterSpacing:.3,minWidth:0,overflowWrap:"anywhere"}}>{title}</h3>
+        <button onClick={tryClose} aria-label="Close" title="Close (Esc)" style={{background:"none",border:"none",cursor:"pointer",fontSize:26,color:"#C9D3DE",lineHeight:1,width:44,height:44,flexShrink:0}}>×</button>
       </div>
-      <div style={{padding:24}}>{children}</div>
+      <div style={{padding:isPhone?"16px 16px calc(24px + env(safe-area-inset-bottom))":24}}>{children}</div>
     </div>
   </div>;
 }
@@ -1552,7 +1574,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions, reple
       ))}
       {filtered.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No parts found.</div>}
     </div>
-    {showAdd&&<Modal title="Add New Part" onClose={()=>setShowAdd(false)}>
+    {showAdd&&<Modal title="Add New Part" onClose={()=>setShowAdd(false)} confirmClose={form.newPartNo||form.description?"Discard this new part?":null}>
       <div style={{display:"grid",gap:14}}>
         <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
           <Input label="New part number (required)" value={form.newPartNo} onChange={e=>setForm(f=>({...f,newPartNo:e.target.value}))} placeholder="e.g. 5100 → CT-5100"/>
@@ -1929,7 +1951,7 @@ function CsvImportModal({ type, actions, existingRecords, onClose }) {
 
   const typeLabel = type.charAt(0).toUpperCase()+type.slice(1);
 
-  return <Modal title={`Import ${typeLabel} from CSV`} onClose={onClose}>
+  return <Modal title={`Import ${typeLabel} from CSV`} width={900} onClose={onClose}>
     <div style={{display:"grid",gap:16}}>
 
       {step==="upload"&&<>
@@ -2305,7 +2327,8 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setForm(f=>({...f,packing_slip_type:newTypeInput.trim()}));setNewTypeInput("");setAddingType(false);}
   const available=parts.filter(p=>!items.find(i=>i.partId===p.id));
 
-  return <Modal title="Create License Plate" onClose={onClose}>
+  const unsaved=items.length>0||!!form.destination||!!form.quote_number||!!form.po_number;
+  return <Modal title="Create License Plate" onClose={onClose} confirmClose={unsaved?"Discard this new license plate?":null}>
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         <Sel label="Type" value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}><option>Outbound</option><option>Inbound</option><option>Transfer</option></Sel>
@@ -2350,9 +2373,9 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
           </div>
         );})}
         {available.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:8,alignItems:"flex-end"}}>
-          <div style={{flex:"1 1 100%",minWidth:0}}><Sel value={pickPart} onChange={e=>setPickPart(e.target.value)}><option value="">Add SKU…</option>{available.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}</Sel></div>
-          <input type="number" min={1} value={pickQty} onChange={e=>setPickQty(e.target.value)} style={{...inputStyle,width:64,fontFamily:"monospace"}}/>
-          <Btn variant="outline" onClick={addItem}>Add</Btn>
+          <div style={{flex:"1 1 100%",minWidth:0}}><PartPicker parts={available} value={pickPart} onChange={setPickPart}/></div>
+          <input type="number" inputMode="numeric" min={1} value={pickQty} onChange={e=>setPickQty(e.target.value)} style={{...inputStyle,width:72,minHeight:44,fontFamily:"monospace"}}/>
+          <Btn variant="outline" onClick={addItem} disabled={!pickPart} style={{minHeight:44}}>Add</Btn>
         </div>}
       </div>
       <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:4}}>
@@ -2711,10 +2734,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         {isPending&&availParts.length>0&&(
           <div style={{background:"#EBF2FA",border:"1px solid #9DC3E6",borderRadius:7,padding:12,marginTop:8,display:"flex",flexWrap:"wrap",gap:8,alignItems:"flex-end"}}>
             <div style={{flex:"1 1 100%",minWidth:0}}>
-              <Sel value={addPartId} onChange={e=>setAddPartId(e.target.value)}>
-                <option value="">Add a part…</option>
-                {availParts.map(p=><option key={p.id} value={p.id}>{p.id} — {p.description}</option>)}
-              </Sel>
+              <PartPicker parts={availParts} value={addPartId} onChange={setAddPartId} placeholder="Add a part: search no. or description…"/>
             </div>
             <input type="number" min="1" value={addQty} onChange={e=>setAddQty(e.target.value)}
               style={{...inputStyle,width:64,fontFamily:"monospace"}} placeholder="Qty"/>
@@ -2756,13 +2776,48 @@ function SubTabs({ value, onChange, items }) {
 }
 
 // Type or pick a SKU from the catalog (works with 100+ parts).
-function PartPicker({ parts, value, onChange, placeholder="Type or pick a SKU…" }) {
-  const listId = useId();
-  const match = parts.find(p=>p.id===value);
-  return <div>
-    <input list={listId} value={value} onChange={e=>onChange(e.target.value.trim())} placeholder={placeholder} style={{...inputStyle,width:"100%",fontFamily:"monospace"}}/>
-    <datalist id={listId}>{parts.map(p=><option key={p.id} value={p.id}>{p.description}</option>)}</datalist>
-    {value&&<div style={{fontSize:11,marginTop:3,color:match?C.textMid:C.red}}>{match?match.description:"No matching SKU"}</div>}
+// Type-ahead part search: matches new #, old #, CT- id or description. value = selected part id.
+function PartPicker({ parts, value, onChange, placeholder="Search part no. or description…" }) {
+  const match=parts.find(p=>p.id===value);
+  const [q,setQ]=useState(value||"");
+  const [open,setOpen]=useState(false);
+  const [hi,setHi]=useState(0);
+  const selfChange=useRef(false);
+  useEffect(()=>{ if(selfChange.current){ selfChange.current=false; return; } setQ(value||""); },[value]);   // parent reset/set
+  const results=useMemo(()=>{
+    const s=q.trim().toLowerCase();
+    const list=s?parts.filter(p=>partMatchesSearch(p,s)):parts;
+    const score=p=>{ const id=p.id.toLowerCase();
+      if(id===s||String(p.new_part_no??"").toLowerCase()===s||String(p.legacy_part_no??"").toLowerCase()===s) return 0;
+      if(id.startsWith(s)||id.replace(/^ct-/,"").startsWith(s)) return 1;
+      if((p.description||"").toLowerCase().startsWith(s)) return 2; return 3; };
+    return [...list].sort((a,b)=>score(a)-score(b)||a.id.localeCompare(b.id)).slice(0,8);
+  },[q,parts]);
+  function choose(p){ selfChange.current=true; setQ(p.id); setOpen(false); onChange(p.id); }
+  function onKey(e){
+    if(e.key==="ArrowDown"){ e.preventDefault(); setOpen(true); setHi(h=>Math.min(h+1,results.length-1)); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(h=>Math.max(h-1,0)); }
+    else if(e.key==="Enter"&&open&&results[hi]){ e.preventDefault(); choose(results[hi]); }
+    else if(e.key==="Escape"&&open){ e.preventDefault(); setOpen(false); }   // close the list, not the popup
+  }
+  return <div style={{position:"relative"}}>
+    <input value={q} onChange={e=>{ setQ(e.target.value); setOpen(true); setHi(0); if(value){ selfChange.current=true; onChange(""); } }}
+      onFocus={()=>setOpen(true)} onBlur={()=>setTimeout(()=>setOpen(false),120)} onKeyDown={onKey}
+      placeholder={placeholder} autoCapitalize="off" autoCorrect="off" spellCheck={false} role="combobox" aria-expanded={open} aria-autocomplete="list"
+      style={{...inputStyle,width:"100%",fontSize:15,minHeight:44}}/>
+    {open&&<div role="listbox" style={{position:"absolute",left:0,right:0,top:"calc(100% + 4px)",zIndex:20,background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,boxShadow:"0 10px 28px rgba(28,43,58,.18)",maxHeight:300,overflowY:"auto"}}>
+      {results.length===0&&<div style={{padding:"12px 14px",fontSize:13,color:C.textLight}}>No matching parts.</div>}
+      {results.map((p,i)=><div key={p.id} role="option" aria-selected={i===hi} onMouseDown={e=>{e.preventDefault();choose(p);}} onMouseEnter={()=>setHi(i)}
+        style={{padding:"8px 12px",minHeight:44,boxSizing:"border-box",cursor:"pointer",background:i===hi?"#EEF3F8":C.white,borderBottom:`1px solid ${C.border}`,display:"flex",gap:10,alignItems:"center"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:"monospace",fontSize:13,fontWeight:700,color:C.amber}}>{p.id} <LegacyNote p={p}/></div>
+          <div style={{fontSize:13,color:C.navy,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.description}</div>
+        </div>
+        <div style={{textAlign:"right",fontSize:11,color:C.textLight,flexShrink:0}}>{p.location?`📍 ${p.location}`:""}<div>{p.stock??0} {p.uom||"EA"}</div></div>
+      </div>)}
+    </div>}
+    {value&&match&&!open&&<div style={{fontSize:11,marginTop:3,color:C.textMid}}>{match.description}</div>}
+    {!value&&q.trim()&&!open&&<div style={{fontSize:11,marginTop:3,color:C.red}}>Pick a part from the list</div>}
   </div>;
 }
 
@@ -3101,6 +3156,7 @@ async function readSlipPdf(file){
 }
 
 function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actions }) {
+  const isPhone=useIsPhone();
   const [busy,run]=useRun();
   const [slips,setSlips]=useState(null);     // review state: [{file,title,quote,slipDate,po,listType,error,lines:[...]}]
   const [reading,setReading]=useState(false);
@@ -3167,7 +3223,7 @@ function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actio
       <button disabled={busy} onClick={()=>{if(window.confirm(`Remove the ${g.n} packing list from this order?`))run(()=>actions.deletePackingList(order.id,g.n));}} style={{border:`1px solid ${C.redBorder}`,background:C.white,color:C.red,borderRadius:4,padding:"2px 8px",fontSize:12,cursor:"pointer"}}>Remove</button>
     </div>)}
     {msg&&<div style={{marginTop:8,fontSize:12,fontWeight:600,color:msg.ok?C.greenText:C.red}}>{msg.text}</div>}
-    {slips&&<Modal title="Review packing lists before loading" onClose={()=>setSlips(null)}>
+    {slips&&<Modal title="Review packing lists before loading" width={1000} onClose={()=>setSlips(null)} confirmClose="Discard these packing lists? Nothing has been loaded yet.">
       <div style={{display:"grid",gap:14}}>
         <div style={{fontSize:12,color:C.textMid}}>Check each line. Amber lines need a look. Nothing is saved until you press Load. Slips may print the old or the new part number; the match uses both plus the description.</div>
         {slips.map((s,si)=>s.error
@@ -3184,11 +3240,11 @@ function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actio
               const cands=l.candidates.map(id=>parts.find(p=>p.id===id)).filter(Boolean);
               const rest=parts.filter(p=>!l.candidates.includes(p.id));
               const warn=l.flags.length>0;
-              return <div key={l.id} style={{display:"grid",gridTemplateColumns:"24px minmax(0,1.2fr) 64px minmax(0,1.4fr)",gap:8,alignItems:"start",padding:"6px 4px",borderTop:`1px solid ${C.border}`,background:!l.include?"#f4f4f4":warn?"#FFF8E6":"transparent",opacity:l.include?1:.6}}>
+              return <div key={l.id} style={{display:"grid",gridTemplateColumns:isPhone?"24px minmax(0,1fr) 64px":"24px minmax(0,1.2fr) 64px minmax(0,1.4fr)",gap:8,alignItems:"start",padding:"6px 4px",borderTop:`1px solid ${C.border}`,background:!l.include?"#f4f4f4":warn?"#FFF8E6":"transparent",opacity:l.include?1:.6}}>
                 <input type="checkbox" checked={l.include} onChange={e=>updLine(si,li,{include:e.target.checked})} style={{marginTop:4}}/>
                 <div style={{fontSize:12}}><b style={{fontFamily:"monospace"}}>{l.no}</b> {l.desc}{l.flags.map((f,k)=><div key={k} style={{color:C.amber,fontWeight:700,fontSize:11}}>⚠ {f}</div>)}</div>
                 <input type="number" min="0" value={l.qty} onChange={e=>updLine(si,li,{qty:e.target.value})} style={{...sel,width:60,fontFamily:"monospace"}}/>
-                <select value={l.partId} onChange={e=>updLine(si,li,{partId:e.target.value})} style={sel}>
+                <select value={l.partId} onChange={e=>updLine(si,li,{partId:e.target.value})} style={{...sel,...(isPhone?{gridColumn:"2 / -1",minHeight:40}:{})}}>
                   <option value="">Choose part…</option>
                   {cands.length>0&&<optgroup label="Suggested">{cands.map(p=><option key={p.id} value={p.id}>{p.id} · {p.description}</option>)}</optgroup>}
                   <optgroup label="All parts">{rest.map(p=><option key={p.id} value={p.id}>{p.id} · {p.description}</option>)}</optgroup>
