@@ -604,7 +604,34 @@ function useData() {
   }
 
   // Adjust stock per supplier — updates supplier_stock rows then recalculates parts.stock total
-  async function adjustSupplierStock(partId, adjustments) {
+  // Physical count: set on-hand to what was counted, with a reason. A shortfall comes off the
+  // stock not tied to a supplier first, then the largest supplier rows; an overage stays unassigned.
+  async function countStock(partId, counted, {reason="Cycle count", note=""}={}){
+    counted=Math.max(0,Math.round(+counted));
+    if(!Number.isFinite(counted)) throw new Error("Enter the counted quantity.");
+    const {data:pr,error}=await _sb.from("parts").select("stock").eq("id",partId).single();
+    if(error) throw new Error(error.message);
+    const before=pr?.stock||0; const delta=counted-before;
+    if(delta<0){
+      const {data:rows}=await _sb.from("supplier_stock").select("supplier_id,qty").eq("part_id",partId);
+      const assigned=(rows||[]).reduce((s,r)=>s+(r.qty||0),0);
+      let take=Math.max(0,-delta-Math.max(0,before-assigned));
+      for(const r of (rows||[]).filter(r=>r.qty>0).sort((a,b)=>b.qty-a.qty)){
+        if(take<=0) break;
+        const t=Math.min(r.qty,take);
+        await dbRun(_sb.from("supplier_stock").update({qty:r.qty-t,updated_at:new Date().toISOString()}).eq("part_id",partId).eq("supplier_id",r.supplier_id));
+        take-=t;
+      }
+    }
+    await dbRun(_sb.from("parts").update({stock:counted}).eq("id",partId));
+    await logAudit("stock_adjust","part",partId,{from:before,to:counted,variance:delta,source:"count",reason,note:note||null});
+    await fetchAll();
+    return {before,counted,delta};
+  }
+  async function adjustSupplierStock(partId, adjustments, {reason="Correction", note=""}={}) {
+    const {data:pr}=await _sb.from("parts").select("stock").eq("id",partId).single();
+    const {data:prev}=await _sb.from("supplier_stock").select("qty").eq("part_id",partId);
+    const unassigned=Math.max(0,(pr?.stock||0)-(prev||[]).reduce((s,r)=>s+(r.qty||0),0));   // kept, not wiped
     for (const adj of adjustments) {
       await _sb.from("supplier_stock").upsert(
         {part_id:partId, supplier_id:adj.supplierId, qty:Math.max(0,adj.qty), updated_at:new Date().toISOString()},
@@ -612,10 +639,10 @@ function useData() {
       );
     }
     const {data:rows} = await _sb.from("supplier_stock").select("qty").eq("part_id",partId);
-    const total = (rows||[]).reduce((sum,r)=>sum+(r.qty||0),0);
-    await _sb.from("parts").update({stock:total}).eq("id",partId);
-    const part=parts.find(p=>p.id===partId);
-    await logAudit("stock_adjust","part",partId,{from:part?.stock,to:total,adjustments,source:"supplier_split"});
+    const total = (rows||[]).reduce((sum,r)=>sum+(r.qty||0),0)+unassigned;
+    await dbRun(_sb.from("parts").update({stock:total}).eq("id",partId));
+    await logAudit("stock_adjust","part",partId,{from:pr?.stock,to:total,variance:total-(pr?.stock||0),adjustments,unassigned,source:"supplier_split",reason,note:note||null});
+    await fetchAll();
   }
 
   async function addPackingSlipType(name){
@@ -830,7 +857,7 @@ function useData() {
 
   return {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
-    loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+    loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,countStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,importControlLists,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo}};
@@ -1194,6 +1221,50 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
 }
 
 // ─── Scan Tab ─────────────────────────────────────────────────────────────────
+// ─── Stock count / adjustment with a reason ──────────────────────────────────
+const STOCK_REASONS=["Cycle count","Damaged","Lost / missing","Found","Used for repair","Correction","Other"];
+function StockCountForm({ part, actions, onDone, onCancel }){
+  const [counted,setCounted]=useState(String(part.stock??0));
+  const [reason,setReason]=useState("Cycle count");
+  const [note,setNote]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const system=part.stock??0; const n=Math.max(0,Math.round(+counted||0)); const delta=n-system;
+  const needNote=reason==="Other"||(delta!==0&&reason==="Correction");
+  async function save(){
+    if(counted===""||!Number.isFinite(+counted)){ setErr("Enter the counted quantity."); return; }
+    if(needNote&&!note.trim()){ setErr("Add a note saying why."); return; }
+    if(Math.abs(delta)>=Math.max(10,system)&&!window.confirm(`That changes ${part.id} by ${delta>0?"+":""}${delta} ${part.uom||"EA"}. Save it?`)) return;
+    setBusy(true); setErr("");
+    try{ const r=await actions.countStock(part.id,n,{reason,note:note.trim()}); onDone?.(r); }
+    catch(e){ setErr(e.message||String(e)); }
+    setBusy(false);
+  }
+  const btn={width:48,height:48,borderRadius:6,border:`1.5px solid ${C.border}`,background:C.white,fontSize:20,cursor:"pointer"};
+  return <div style={{display:"grid",gap:12}}>
+    <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+      <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>In the app</div><div style={{fontFamily:"monospace",fontSize:20,fontWeight:700,color:C.navy}}>{system} {part.uom||"EA"}</div></div>
+      <div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Difference</div><div style={{fontFamily:"monospace",fontSize:20,fontWeight:700,color:delta===0?C.greenText:delta>0?C.navy:C.red}}>{delta>0?"+":""}{delta}</div></div>
+      {part.location&&<div><div style={{fontSize:10,color:C.textLight,textTransform:"uppercase"}}>Bin</div><div style={{fontFamily:"monospace",fontSize:16,color:C.navy}}>{part.location}</div></div>}
+    </div>
+    <Field label="Counted on the shelf">
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <button onClick={()=>setCounted(c=>String(Math.max(0,(+c||0)-1)))} style={btn}>−</button>
+        <input type="number" inputMode="numeric" min="0" value={counted} onChange={e=>setCounted(e.target.value)} onFocus={e=>e.target.select()}
+          style={{...inputStyle,flex:1,textAlign:"center",fontSize:22,fontFamily:"monospace",fontWeight:700,minHeight:48}}/>
+        <button onClick={()=>setCounted(c=>String((+c||0)+1))} style={btn}>+</button>
+      </div>
+    </Field>
+    <Sel label="Reason" value={reason} onChange={e=>setReason(e.target.value)}>{STOCK_REASONS.map(r=><option key={r}>{r}</option>)}</Sel>
+    <Input label={needNote?"Note (required)":"Note (optional)"} value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g. 2 found in Rack 2"/>
+    {err&&<div style={{color:C.red,fontSize:13}}>⚠ {err}</div>}
+    <div style={{display:"flex",gap:10}}>
+      {onCancel&&<Btn variant="outline" style={{flex:1,justifyContent:"center",minHeight:48}} onClick={onCancel}>Cancel</Btn>}
+      <Btn style={{flex:1,justifyContent:"center",minHeight:48}} disabled={busy} onClick={save}>{busy?"Saving…":delta===0?"✅ Confirm count":"✅ Save count"}</Btn>
+    </div>
+  </div>;
+}
+
 // ─── Picking screen (full screen) ─────────────────────────────────────────────
 // Picks parts from the warehouse into a pending outbound license plate.
 // Lines are sorted by bin location so the list follows the walk through the racks.
@@ -1424,7 +1495,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
   }
   function applyScan(t,part){
     setChoices(null);
-    if(mode==="lookup"||mode==="receive"){
+    if(mode==="lookup"||mode==="receive"||mode==="count"){
       if(part) setResult({type:"part",data:part});
       else setNotFound(t);
     }
@@ -1448,6 +1519,7 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
   const modes=[
     {id:"lookup",icon:"🔍",label:"Look Up Part",desc:"Scan a SKU to view part details & stock level"},
     {id:"receive",icon:"📥",label:"Receive Stock",desc:"Scan a part, pick its open PO, confirm the quantity"},
+    {id:"count",icon:"🔢",label:"Count Stock",desc:"Scan a part and enter how many are on the shelf"},
     {id:"pick",icon:"📤",label:"Pick a License Plate",desc:"Scan the LP label, then pick its parts into the container"},
   ];
 
@@ -1525,6 +1597,21 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
         {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
         {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
       </div>}
+      {mode==="count"&&!result&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+        <CameraScanner onScan={handleScan} onClose={reset} hint="Point at the part or bin label to count"/>
+        <div style={{textAlign:"center",color:C.textLight,fontSize:12}}>— or enter manually —</div>
+        <ManualEntry onSubmit={handleScan}/>
+        {choices&&<PartChooser code={choices.code} choices={choices.list} onPick={p=>applyScan(choices.code.toUpperCase(),p)} onCancel={()=>setChoices(null)}/>}
+        {notFound&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:6,padding:"10px 14px",fontSize:13,color:C.red}}>❌ No part found for <strong>{notFound}</strong></div>}
+      </div>}
+      {mode==="count"&&result?.type==="part"&&(()=>{ const live=parts.find(x=>x.id===result.data.id)||result.data; return <div style={{display:"grid",gap:12}}>
+        <div style={{background:C.white,border:`2px solid ${C.amber}`,borderRadius:8,padding:14}}>
+          <div style={{fontFamily:"monospace",fontSize:13,color:C.amber,fontWeight:700}}>{live.id} <LegacyNote p={live}/></div>
+          <div style={{fontWeight:700,fontSize:15,color:C.navy,marginTop:2}}>{live.description}</div>
+        </div>
+        <StockCountForm key={live.id} part={live} actions={actions} onCancel={()=>setResult(null)}
+          onDone={r=>{ showToast(r.delta===0?`✅ ${live.id} count confirmed: ${r.counted}`:`✅ ${live.id}: ${r.before} → ${r.counted} (${r.delta>0?"+":""}${r.delta})`); setResult(null); }}/>
+      </div>; })()}
       {mode==="receive"&&result?.type==="part"&&<ReceiveResult purchaseOrders={purchaseOrders} poLines={poLines} result={result} parts={parts} suppliers={suppliers} mfgBarcodes={mfgBarcodes} lastScanned={lastScanned} receiveQty={receiveQty} setReceiveQty={setReceiveQty} saving={saving} onBack={()=>setResult(null)} onConfirm={applyReceive}/>}
 
       {mode==="pick"&&<div style={{display:"grid",gap:12}}>
@@ -1638,6 +1725,9 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
   const [addSupForm,setAddSupForm]=useState({supplierId:"",mfgPartNo:"",leadDays:"",unitCost:""});
   const [addBcForm,setAddBcForm]=useState({barcode:"",supplierId:"",description:""});
   const [editStock,setEditStock]=useState(false);
+  const [counting,setCounting]=useState(false);
+  const [adjReason,setAdjReason]=useState("Correction");
+  const [adjNote,setAdjNote]=useState("");
   const [supQtys,setSupQtys]=useState({});
   const [saving,setSaving]=useState(false);
   const [scanningBc,setScanningBc]=useState(false);
@@ -1659,7 +1749,9 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
     if(!Object.keys(supQtys).length) return;
     setSaving(true);
     const adjustments=Object.entries(supQtys).map(([supplierId,qty])=>({supplierId,qty:+qty||0}));
-    await actions.adjustSupplierStock(live.id, adjustments);
+    if((adjReason==="Other"||adjReason==="Correction")&&!adjNote.trim()){ alert("Add a note saying why."); setSaving(false); return; }
+    await actions.adjustSupplierStock(live.id, adjustments, {reason:adjReason, note:adjNote.trim()});
+    setAdjNote("");
     setSaving(false);
     setEditStock(false);
   }
@@ -1735,10 +1827,14 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
       <div style={{background:C.offWhite,borderRadius:7,padding:16,border:`1px solid ${C.border}`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
           <SectionTitle>Inventory</SectionTitle>
-          <Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} onClick={openAdjust} disabled={!live.suppliers?.length}>
-            {live.suppliers?.length?"Adjust Stock":"Add Supplier First"}
-          </Btn>
+          <div style={{display:"flex",gap:6}}>
+            <Btn style={{padding:"5px 12px",fontSize:12}} onClick={()=>{setEditStock(false);setCounting(true);}}>🔢 Count</Btn>
+            {live.suppliers?.length>0&&<Btn variant="outline" style={{padding:"5px 12px",fontSize:12}} onClick={()=>{setCounting(false);openAdjust();}}>By supplier</Btn>}
+          </div>
         </div>
+        {counting&&<div style={{background:C.white,border:`1.5px solid ${C.amber}`,borderRadius:7,padding:12,marginBottom:12}}>
+          <StockCountForm key={live.id} part={live} actions={actions} onCancel={()=>setCounting(false)} onDone={()=>setCounting(false)}/>
+        </div>}
         <div style={{display:"flex",gap:24,alignItems:"center",marginBottom:12}}>
           <div><div style={{fontFamily:"monospace",fontSize:30,fontWeight:700,color:C.navy}}>{live.stock}</div><div style={{fontSize:11,color:C.textLight}}>total on hand</div></div>
           <div><div style={{fontFamily:"monospace",fontSize:18,color:C.textMid}}>{live.minStock}</div><div style={{fontSize:11,color:C.textLight}}>minimum</div></div>
@@ -1782,7 +1878,12 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
               </div>;
             })}
             <div style={{background:C.greenBg,border:`1px solid ${C.greenBdr}`,borderRadius:6,padding:"8px 12px",fontSize:13,color:C.greenText,marginBottom:10}}>
-              New total: <strong>{Object.values(supQtys).reduce((a,b)=>a+(+b||0),0)} {live.uom}</strong>
+              New total: <strong>{Object.values(supQtys).reduce((a,b)=>a+(+b||0),0)+Math.max(0,(live.stock||0)-partSupplierStock.reduce((a,r)=>a+(r.qty||0),0))} {live.uom}</strong>
+              {Math.max(0,(live.stock||0)-partSupplierStock.reduce((a,r)=>a+(r.qty||0),0))>0&&<span style={{color:C.textMid}}> (includes {Math.max(0,(live.stock||0)-partSupplierStock.reduce((a,r)=>a+(r.qty||0),0))} not tied to a supplier)</span>}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1.4fr)",gap:10,marginBottom:10}}>
+              <Sel label="Reason" value={adjReason} onChange={e=>setAdjReason(e.target.value)}>{STOCK_REASONS.map(r=><option key={r}>{r}</option>)}</Sel>
+              <Input label={adjReason==="Other"||adjReason==="Correction"?"Note (required)":"Note"} value={adjNote} onChange={e=>setAdjNote(e.target.value)}/>
             </div>
             <div style={{display:"flex",gap:8}}>
               <Btn variant="outline" style={{flex:1,justifyContent:"center"}} onClick={()=>setEditStock(false)}>Cancel</Btn>
