@@ -2125,46 +2125,90 @@ function InventoryTab({ parts, suppliers }) {
 }
 
 // ─── License Plates Tab ───────────────────────────────────────────────────────
-function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes, mfgBarcodes, actions }) {
+function LicensePlatesTab({ fabricators, lps, parts, customers, packingSlipTypes, mfgBarcodes, actions, focus, onFocusDone, onOpenOrder }) {
   const [showCreate,setShowCreate]=useState(false);
   const [viewLp,setViewLp]=useState(null);
   const [pickId,setPickId]=useState(null);
+  const [search,setSearch]=useState("");
+  const [statusFilter,setStatusFilter]=useState("Pending");
+  // Opened from another tab (e.g. an order): show that LP, or go straight to picking.
+  useEffect(()=>{
+    if(!focus) return;
+    if(focus.pick) setPickId(focus.id); else setViewLp({id:focus.id});
+    setStatusFilter("All");
+    onFocusDone?.();
+  },[focus]);
   const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
+  const custName=id=>customers?.find(c=>c.id===id)?.name||"";
+  const openIssues=lp=>(lp.items||[]).filter(i=>i.issue&&!i.issue.resolved_at).length;
+  const counts={All:lps.length,Problems:lps.filter(l=>openIssues(l)>0).length};
+  ["Pending","Shipped","Received","Cancelled"].forEach(s=>{counts[s]=lps.filter(l=>l.status===s).length;});
+  const q=search.trim().toLowerCase();
+  const shown=lps.filter(lp=>{
+    if(statusFilter==="Problems"){ if(!openIssues(lp)) return false; }
+    else if(statusFilter!=="All"&&lp.status!==statusFilter) return false;
+    if(!q) return true;
+    const hay=[lp.id,lp.destination,custName(lp.customer_id),lp.quote_number,lp.po_number,lp.order_id,lp.packing_slip_type,
+      fabricators?.find(f=>f.id===lp.fabricator_id)?.name,...(lp.items||[]).map(i=>i.partId)].filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+  const chip=(k,label)=><button key={k} onClick={()=>setStatusFilter(k)} style={{border:`1.5px solid ${statusFilter===k?C.navy:C.border}`,background:statusFilter===k?C.navy:C.white,color:statusFilter===k?"#fff":C.navy,
+    borderRadius:16,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>{label} <span style={{opacity:.7}}>{counts[k]}</span></button>;
   return <div>
-    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:18}}><Btn onClick={()=>setShowCreate(true)}>+ Create License Plate</Btn></div>
+    <div style={{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap",alignItems:"center"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search LP, customer, quote, PO, order, part…" style={{...inputStyle,flex:"1 1 220px"}}/>
+      <Btn onClick={()=>setShowCreate(true)}>+ Create License Plate</Btn>
+    </div>
+    <div style={{display:"flex",gap:6,marginBottom:14,overflowX:"auto",paddingBottom:2}}>
+      {chip("Pending","Pending")}{chip("Shipped","Shipped")}{chip("Received","Received")}{chip("Cancelled","Cancelled")}{chip("All","All")}
+      {counts.Problems>0&&chip("Problems","⚠ Problems")}
+    </div>
     <div style={{display:"grid",gap:10}}>
-      {lps.map(lp=>(
-        <div key={lp.id} onClick={()=>setViewLp(lp)} style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:7,padding:"14px 18px",cursor:"pointer",transition:"border-color .15s"}}
-          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
-            <div>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
+      {shown.map(lp=>{
+        const pr=lpPickProgress(lp.items); const issues=openIssues(lp);
+        const outbound=(lp.type||"Outbound")==="Outbound";
+        const checked=(lp.items||[]).filter(i=>i.checked).length; const hasChecklist=(lp.items||[]).some(i=>i.list||i.source);
+        const done=pr.qty>0&&pr.picked>=pr.qty;
+        const created=String(lp.createdAt||lp.created_at||"").slice(0,10);
+        return <div key={lp.id} onClick={()=>setViewLp(lp)} style={{background:C.white,border:`1.5px solid ${issues?C.redBorder:C.border}`,borderRadius:7,padding:"12px 16px",cursor:"pointer",transition:"border-color .15s",display:"grid",gap:8}}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.amber;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=issues?C.redBorder:C.border;}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+            <div style={{minWidth:0,flex:1}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
                 <span style={{fontFamily:"monospace",fontSize:14,fontWeight:700,color:C.navy}}>{lp.id}</span>
                 <Badge color={sc(lp.status)}>{lp.status}</Badge>
-                <Badge color={lp.type==="Outbound"?"red":"navy"}>{lp.type}</Badge>
-                {lp.packing_slip_type&&<Badge color="gray">📋 {lp.packing_slip_type}</Badge>}
+                {!outbound&&<Badge color="navy">{lp.type}</Badge>}
+                {lp.order_id&&<button onClick={e=>{e.stopPropagation();onOpenOrder?.(lp.order_id);}} title="Open the order"
+                  style={{border:"1px solid #9DC3E6",background:"#EBF2FA",color:C.navy,borderRadius:4,padding:"1px 8px",fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"monospace"}}>📑 {lp.order_id}</button>}
                 {lp.fabricator_id&&<Badge color="blue">🏭 {fabricators?.find(f=>f.id===lp.fabricator_id)?.name||lp.fabricator_id}</Badge>}
-                {(lp.items||[]).some(i=>i.issue&&!i.issue.resolved_at)&&<Badge color="red">⚠ {(lp.items||[]).filter(i=>i.issue&&!i.issue.resolved_at).length} problem(s)</Badge>}
+                {issues>0&&<Badge color="red">⚠ {issues} problem{issues>1?"s":""}</Badge>}
               </div>
-              {(()=>{const c=customers?.find(x=>x.id===lp.customer_id);return c?<div style={{fontSize:13,fontWeight:600,color:C.navy,marginBottom:2}}>🏢 {c.name}</div>:null;})()}
-              <div style={{fontSize:13,color:C.textMid}}>→ {lp.destination}</div>
-              <div style={{fontSize:11,color:C.textLight,marginTop:2,display:"flex",gap:12,flexWrap:"wrap"}}>
-                <span>Created {lp.createdAt||lp.created_at}</span>
-                {lp.quote_number&&<span>Quote: <strong>{lp.quote_number}</strong></span>}
-                {lp.po_number&&<span>PO: <strong>{lp.po_number}</strong></span>}
+              <div style={{fontSize:13,fontWeight:600,color:C.navy,overflowWrap:"anywhere"}}>{custName(lp.customer_id)||lp.destination}</div>
+              {custName(lp.customer_id)&&lp.destination&&lp.destination!==custName(lp.customer_id)&&<div style={{fontSize:12,color:C.textMid}}>→ {lp.destination}</div>}
+              <div style={{fontSize:11,color:C.textLight,marginTop:2,display:"flex",gap:10,flexWrap:"wrap"}}>
+                {created&&<span>Created {fmtDate(created)}</span>}
+                {lp.quote_number&&<span>Quote <strong>{lp.quote_number}</strong></span>}
+                {lp.po_number&&<span>PO <strong>{lp.po_number}</strong></span>}
+                <span>{(lp.items||[]).length} line{(lp.items||[]).length!==1?"s":""}</span>
               </div>
             </div>
-            <div style={{textAlign:"right"}}><div style={{fontFamily:"monospace",fontSize:22,fontWeight:700,color:C.amber}}>{lp.items?.length||0}</div><div style={{fontSize:11,color:C.textLight}}>line items</div></div>
+            {outbound&&lp.status==="Pending"&&pr.qty>0&&<button onClick={e=>{e.stopPropagation();setPickId(lp.id);}}
+              style={{flexShrink:0,minHeight:44,minWidth:72,borderRadius:8,border:"none",background:done?C.greenText:C.navy,color:"#fff",fontWeight:800,fontSize:13,cursor:"pointer"}}>{done?"✓ Picked":"▶ Pick"}</button>}
           </div>
-          <div style={{marginTop:10,display:"flex",flexWrap:"wrap",gap:6}}>
-            {lp.items?.map((it,i)=><span key={i} style={{background:"#EBF2FA",color:C.navy,border:"1px solid #9DC3E6",borderRadius:3,padding:"2px 8px",fontSize:11,fontFamily:"monospace"}}>{it.partId} ×{it.qty}</span>)}
-          </div>
-        </div>
-      ))}
-      {lps.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No license plates yet.</div>}
+          {outbound&&pr.qty>0&&<div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.textMid,marginBottom:3,gap:8,flexWrap:"wrap"}}>
+              <span><b style={{color:done?C.greenText:C.navy}}>{pr.picked} of {pr.qty}</b> picked</span>
+              <span>{pr.direct>0&&<span style={{color:C.amber,fontWeight:700}}>🚚 {pr.direct} direct-ship open</span>}{hasChecklist&&<span style={{marginLeft:pr.direct?10:0}}>☑ {checked}/{(lp.items||[]).length} checked</span>}</span>
+            </div>
+            <div style={{background:C.border,height:6,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${pr.picked/pr.qty*100}%`,background:done?C.greenText:C.amber}}/></div>
+          </div>}
+        </div>;
+      })}
+      {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>{lps.length===0?"No license plates yet. Create one from an order.":"No license plates match."}</div>}
     </div>
     {showCreate&&<CreateLpModal parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} actions={actions} onClose={()=>setShowCreate(false)}/>}
-    {viewLp&&<LpDetailModal fabricators={fabricators} lp={lps.find(l=>l.id===viewLp.id)||viewLp} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setViewLp(null)} onStartPick={id=>{setViewLp(null);setPickId(id);}}/>}
+    {viewLp&&lps.find(l=>l.id===viewLp.id)&&<LpDetailModal fabricators={fabricators} lp={lps.find(l=>l.id===viewLp.id)} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes||[]} actions={actions}
+      onClose={()=>setViewLp(null)} onStartPick={id=>{setViewLp(null);setPickId(id);}} onOpenOrder={onOpenOrder}/>}
     {pickId&&<PickScreen lpId={pickId} lps={lps} parts={parts} mfgBarcodes={mfgBarcodes||[]} actions={actions} onClose={()=>setPickId(null)}/>}
   </div>;
 }
@@ -2240,7 +2284,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
-function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose, onStartPick }) {
+function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose, onStartPick, onOpenOrder }) {
   // Every change saves as soon as it is made (text fields when you leave the box,
   // quantities ~0.7 s after the last change). Status changes use the buttons at the top.
   const [status,setStatus]=useState(lp.status);
@@ -2399,6 +2443,8 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
           <Badge color={{Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[status]||"gray"}>{status}</Badge>
           {isPending&&<Badge color="green">✏️ Editable</Badge>}
         </div>
+        {lp.order_id&&onOpenOrder&&<button onClick={async()=>{ if(!(await flushItems())) return; onClose(); onOpenOrder(lp.order_id); }}
+          style={{border:"1px solid #9DC3E6",background:"#EBF2FA",color:C.navy,borderRadius:6,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📑 Order {lp.order_id} ›</button>}
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
           const itemBlocks=(items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");const imgTag=p?.image_url?`<img src="${p.image_url}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid #E0E3E7;float:right;margin-left:10px;"/>` : "";return `<div class="item"><div class="item-header">${imgTag}<span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg><div style="clear:both"></div></div>`;}).join("");
           const bcScripts=(items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
@@ -3081,7 +3127,7 @@ function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actio
   </div>;
 }
 
-function OrderLpPanel({ order, lps, actions, disabled, packingCount=0 }) {
+function OrderLpPanel({ order, lps, actions, disabled, packingCount=0, onOpenLp }) {
   const [busy,run]=useRun();
   const [msg,setMsg]=useState(null);
   const mine=lps.filter(l=>l.order_id===order.id);
@@ -3089,22 +3135,33 @@ function OrderLpPanel({ order, lps, actions, disabled, packingCount=0 }) {
     if(mine.length>0&&!window.confirm(`This order already has ${mine.length} license plate${mine.length>1?"s":""} (${mine.map(l=>l.id).join(", ")}).\n\nCreate another one?`)) return;
     try{
       const r=await actions.createLpFromOrder(order.id);
-      setMsg({ok:true,text:`Created ${r.id}: ${r.lines} lines${r.direct?` (${r.direct} ship direct from supplier)`:""}.${r.skipped.length?` Skipped unknown parts: ${[...new Set(r.skipped)].join(", ")}.`:""} Open it from the License Plates tab to review, add boxes and start picking.`});
+      setMsg({ok:true,text:`Created ${r.id}: ${r.lines} lines${r.direct?` (${r.direct} ship direct from supplier)`:""}.${r.skipped.length?` Skipped unknown parts: ${[...new Set(r.skipped)].join(", ")}.`:""}`});
     }catch(e){ setMsg({ok:false,text:e.message||String(e)}); }
   }
-  return <div style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,background:C.white}}>
+  const sc=s=>({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"}[s]||"gray");
+  const small={minHeight:36,padding:"0 12px",borderRadius:6,fontSize:12,fontWeight:700,cursor:"pointer"};
+  return <div style={{border:`1.5px solid ${C.border}`,borderRadius:8,padding:12,background:C.white,display:"grid",gap:8}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
       <div>
         <div style={{fontWeight:800,fontSize:13,color:C.navy}}>Shipment license plate</div>
-        <div style={{fontSize:12,color:C.textLight}}>{mine.length>0?mine.map(l=>`${l.id} (${l.status})`).join(" · "):(packingCount>0?"None yet. Will load every line from this order's packing lists.":"None yet. No packing lists loaded, so it will load the control list(s) for this order's vessels and units.")}</div>
+        {mine.length===0&&<div style={{fontSize:12,color:C.textLight}}>{packingCount>0?"None yet. Will load every line from this order's packing lists.":"None yet. No packing lists loaded, so it will load the control list(s) for this order's vessels and units."}</div>}
       </div>
-      <Btn disabled={busy||disabled} onClick={()=>run(create)}>{mine.length>0?"Create another LP":"Create LP from order"}</Btn>
+      <Btn variant={mine.length>0?"outline":"primary"} disabled={busy||disabled} onClick={()=>run(create)}>{busy?"Creating…":mine.length>0?"Create another LP":"Create LP from order"}</Btn>
     </div>
-    {msg&&<div style={{marginTop:8,fontSize:12,fontWeight:600,color:msg.ok?C.greenText:C.red}}>{msg.text}</div>}
+    {mine.map(l=>{ const pr=lpPickProgress(l.items); const canPick=l.status==="Pending"&&(l.type||"Outbound")==="Outbound"&&pr.qty>0;
+      return <div key={l.id} style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderTop:`1px solid ${C.border}`,paddingTop:8}}>
+        <span style={{fontFamily:"monospace",fontWeight:800,fontSize:13,color:C.navy}}>{l.id}</span>
+        <Badge color={sc(l.status)}>{l.status}</Badge>
+        {pr.qty>0&&<span style={{fontSize:12,color:C.textMid}}>{pr.picked}/{pr.qty} picked</span>}
+        <span style={{flex:1}}/>
+        {onOpenLp&&<button onClick={()=>onOpenLp(l.id)} style={{...small,border:`1.5px solid ${C.navy}`,background:C.white,color:C.navy}}>Open</button>}
+        {onOpenLp&&canPick&&<button onClick={()=>onOpenLp(l.id,true)} style={{...small,border:"none",background:C.navy,color:"#fff"}}>▶ Pick</button>}
+      </div>; })}
+    {msg&&<div style={{fontSize:12,fontWeight:600,color:msg.ok?C.greenText:C.red}}>{msg.text}</div>}
   </div>;
 }
 
-function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose }) {
+function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customers, orderLines, maintLines, vesselModels, controlLines, maintKits, kitLines, parts, actions, onClose, onOpenLp }) {
   const [f,setF]=useState({customer_id:order.customer_id||"",quote_number:order.quote_number||"",po_number:order.po_number||"",project_name:order.project_name||"",notes:order.notes||"",status:order.status||"Open"});
   const [busy,run]=useRun();
   const set=(k)=>(e)=>setF(p=>({...p,[k]:e.target.value}));
@@ -3131,7 +3188,7 @@ function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customer
         </div>
       </div>
       <OrderPackingPanel order={order} packingLines={packingLines||[]} parts={parts} packingSlipTypes={packingSlipTypes||[]} actions={actions}/>
-      <OrderLpPanel order={order} lps={lps||[]} actions={actions} packingCount={(packingLines||[]).filter(l=>l.order_id===order.id).length} disabled={(order.status||"Open")!=="Open"}/>
+      <OrderLpPanel order={order} lps={lps||[]} actions={actions} onOpenLp={onOpenLp} packingCount={(packingLines||[]).filter(l=>l.order_id===order.id).length} disabled={(order.status||"Open")!=="Open"}/>
       <SectionTitle>{isMaint?"Purchase order lines":"Vessels on this order"}</SectionTitle>
       {isMaint
         ? <MaintenanceLines order={order} lines={maintLines.filter(l=>l.order_id===order.id)} parts={parts} maintKits={maintKits} kitLines={kitLines} actions={actions}/>
@@ -3140,11 +3197,12 @@ function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customer
   </Modal>;
 }
 
-function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions }) {
+function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, maintLines, customers, vesselModels, controlLines, maintKits, kitLines, parts, actions, focus, onFocusDone, onOpenLp }) {
   const [typeFilter,setTypeFilter]=useState("all");
   const [search,setSearch]=useState("");
   const [showNew,setShowNew]=useState(false);
   const [openId,setOpenId]=useState(null);
+  useEffect(()=>{ if(focus){ setOpenId(focus.id); onFocusDone?.(); } },[focus]);   // opened from an LP
   const custName=(id)=>customers.find(c=>c.id===id)?.name||"";
   const shown=orders.filter(o=>(typeFilter==="all"||(o.order_type||"manufacturing")===typeFilter)
     && `${o.id} ${o.quote_number||""} ${o.po_number||""} ${o.project_name||""} ${custName(o.customer_id)}`.toLowerCase().includes(search.toLowerCase()));
@@ -3181,6 +3239,7 @@ function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, ma
                 ? <Badge color="gray">{ml.length} line(s) · {ml.filter(l=>l.status==="Open").length} open</Badge>
                 : Object.entries(byStatus).map(([s,n])=><Badge key={s} color={lineStatusColor(s)}>{n} × {s}</Badge>)}
               {!isMaint&&vl.length===0&&<Badge color="amber">No vessels yet</Badge>}
+              {lps.filter(l=>l.order_id===o.id).map(l=>{const pr=lpPickProgress(l.items);return <Badge key={l.id} color={({Pending:"amber",Shipped:"blue",Received:"green",Cancelled:"red"})[l.status]||"gray"}>🏷️ {l.id}{l.status==="Pending"&&pr.qty?` · ${pr.picked}/${pr.qty}`:` · ${l.status}`}</Badge>;})}
             </div>
           </div>
         </div>;
@@ -3188,7 +3247,7 @@ function OrdersTab({ packingLines, packingSlipTypes, lps, orders, orderLines, ma
       {shown.length===0&&<div style={{textAlign:"center",padding:48,color:C.textLight}}>No orders yet. Create one to start planning demand.</div>}
     </div>
     {showNew&&<NewOrderModal customers={customers} actions={actions} onClose={()=>setShowNew(false)} onCreated={id=>{setShowNew(false);setOpenId(id);}}/>}
-    {open&&<OrderDetailModal packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)}/>}
+    {open&&<OrderDetailModal packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} order={open} customers={customers} orderLines={orderLines} maintLines={maintLines} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} onClose={()=>setOpenId(null)} onOpenLp={onOpenLp}/>}
   </div>;
 }
 
@@ -3573,6 +3632,10 @@ function PurchaseOrdersTab({ purchaseOrders, poLines, suppliers, parts, actions 
 // ─── App Shell ────────────────────────────────────────────────────────────────
 function MainApp({ user, onSignOut }) {
   const [tab,setTab]=useState("scan");
+  const [lpFocus,setLpFocus]=useState(null);       // {id, pick} — open an LP from another tab
+  const [orderFocus,setOrderFocus]=useState(null); // {id} — open an order from another tab
+  const openLp=(id,pick=false)=>{ setLpFocus({id,pick}); setTab("lp"); };
+  const openOrder=(id)=>{ setOrderFocus({id}); setTab("orders"); };
   const {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
@@ -3641,9 +3704,9 @@ function MainApp({ user, onSignOut }) {
           :tab==="suppliers"?<SuppliersTab suppliers={suppliers} parts={parts} actions={actions}/>
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} actions={actions}/>
-          :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions}/>
+          :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions} focus={lpFocus} onFocusDone={()=>setLpFocus(null)} onOpenOrder={openOrder}/>
           :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
-          :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions}/>
+          :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} focus={orderFocus} onFocusDone={()=>setOrderFocus(null)} onOpenLp={openLp}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
           :tab==="pos"?<PurchaseOrdersTab purchaseOrders={purchaseOrders} poLines={poLines} suppliers={suppliers} parts={parts} actions={actions}/>
