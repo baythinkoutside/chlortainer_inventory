@@ -437,7 +437,7 @@ function useData() {
     const today=new Date().toISOString().slice(0,10).replace(/-/g,"");
     const suffix=Math.random().toString(36).slice(2,6).toUpperCase();
     const id=`LP-${today}-${suffix}`;
-    await _sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null,customer_id:form.customer_id||null,order_id:form.order_id||null});
+    await dbRun(_sb.from("license_plates").insert({id,type:form.type,destination:form.destination,status:form.status,created_at:new Date().toISOString().slice(0,10),items,packing_slip_type:form.packing_slip_type||null,quote_number:form.quote_number||null,po_number:form.po_number||null,customer_id:form.customer_id||null,order_id:form.order_id||null}));   // errors surface instead of a silent no-op
     await logAudit("lp_create","license_plate",id,{type:form.type,destination:form.destination,packing_slip_type:form.packing_slip_type,quote_number:form.quote_number,po_number:form.po_number,items});
     return id;
   }
@@ -2386,6 +2386,157 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   </Modal>;
 }
 
+// ─── License plate print (packing list) ──────────────────────────────────────
+// Letter-size, table layout: grouped by packing list type (Main / Loose / Spare…), then by box,
+// lines in bin order. Direct-ship items listed separately. Photos and line barcodes can be
+// switched off in the print window before printing.
+async function printLicensePlate({ lp, items, parts, customer, packingSlipTypes=[], fabricator }){
+  const w=window.open("","_blank");           // open first, inside the click, so pop-up blockers allow it
+  if(!w){ alert("Allow pop-ups to print the license plate."); return; }
+  w.document.write("<p style='font:14px Arial;padding:24px'>Preparing license plate…</p>");
+  // Barcodes are drawn here with the bundled library, then written into the page as SVG,
+  // so printing works offline and never waits on a CDN.
+  let JsBarcode=null;
+  try{ JsBarcode=(await import("jsbarcode")).default; }catch(_){ }
+  const partOf=id=>parts.find(p=>p.id===id);
+  const isDirect=it=>it.source==="direct";
+  const listOf=it=>it.list||lp.packing_slip_type||"Items";
+  const typeOrder=packingSlipTypes.map(t=>t.name);
+  const rank=n=>{ const i=typeOrder.indexOf(n); return i<0?999:i; };
+  const boxNum=b=>{ const m=String(b||"").match(/(\d+)\s*$/); return m?+m[1]:0; };
+  const bin=it=>String(partOf(it.partId)?.location||"").toUpperCase()||"￿";
+  const warehouse=items.map((it,i)=>({it,i})).filter(x=>!isDirect(x.it));
+  const direct=items.filter(isDirect);
+  const lists=[...new Set(warehouse.map(x=>listOf(x.it)))].sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
+  const sumQty=arr=>arr.reduce((s,x)=>s+(+x.qty||0),0);
+  const shipped=["Shipped","Received"].includes(lp.status);
+  const hasBins=items.some(it=>!isDirect(it)&&String(partOf(it.partId)?.location||"").trim());
+  const pcs=n=>`${n} pc${n===1?"":"s"}`;
+  const bcSvg=(code,cls)=>{
+    if(!JsBarcode) return `<div class="nobc">${esc(code)}</div>`;
+    try{
+      const el=document.createElementNS("http://www.w3.org/2000/svg","svg");
+      JsBarcode(el,String(code),cls==="lp"?{format:"CODE128",width:2.2,height:56,displayValue:false,margin:0,lineColor:"#1C2B3A"}
+                                         :{format:"CODE128",width:1.25,height:30,displayValue:false,margin:0,lineColor:"#1C2B3A"});
+      el.setAttribute("class",cls);
+      return el.outerHTML;
+    }catch(_){ return `<div class="nobc">${esc(code)}</div>`; }
+  };
+
+  const row=(it)=>{
+    const p=partOf(it.partId);
+    const picked=+it.picked||0;
+    const short=shipped&&!it.no_stock&&picked<it.qty?`<div class="short">short ${it.qty-picked}</div>`:"";
+    return `<tr>
+      <td class="ck"><span class="box"></span></td>
+      <td class="qty">${esc(it.qty)}<div class="uom">${esc(p?.uom||"EA")}</div>${short}</td>
+      <td class="pn"><b>${esc(it.partId)}</b>${p?.legacy_part_no?`<div class="old">Old #${esc(p.legacy_part_no)}</div>`:""}</td>
+      <td class="desc">${esc(p?.description||it.description||"—")}</td>
+      <td class="bin">${esc(p?.location||"")}</td>
+      <td class="bcc lbc">${bcSvg(it.partId,"line")}</td>
+      <td class="ph">${p?.image_url?`<img src="${esc(p.image_url)}" alt="">`:""}</td>
+    </tr>`;
+  };
+  const colHead=`<tr class="cols"><th class="ck">✓</th><th class="qty">Qty</th><th class="pn">Part #</th><th class="desc">Description</th><th class="bin">Bin</th><th class="bcc lbc">Barcode</th><th class="ph">Photo</th></tr>`;
+
+  const sections=lists.map(name=>{
+    const rows=warehouse.filter(x=>listOf(x.it)===name).map(x=>x.it);
+    const boxes=[...new Set(rows.map(it=>it.box&&it.box!==name?it.box:""))].sort((a,b)=>boxNum(a)-boxNum(b)||a.localeCompare(b));
+    const body=boxes.map(bx=>{
+      const r=rows.filter(it=>(it.box&&it.box!==name?it.box:"")===bx).sort((a,b)=>bin(a).localeCompare(bin(b))||a.partId.localeCompare(b.partId));
+      const label=bx?bx.replace(new RegExp("^"+name.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*","i"),"")||bx:"";
+      return `<tbody class="${r.length<=16?"keep":""}">${bx?`<tr class="boxrow"><td colspan="7">📦 ${esc(label)} <span>· ${r.length} line${r.length!==1?"s":""} · ${pcs(sumQty(r))}</span></td></tr>`:""}${r.map(row).join("")}</tbody>`;
+    }).join("");
+    return `<table class="lines">
+      <thead><tr class="grp"><th colspan="7"><span class="type">${esc(name)}</span><span class="gmeta">${rows.length} line${rows.length!==1?"s":""} · ${pcs(sumQty(rows))}${boxes.filter(Boolean).length?` · ${boxes.filter(Boolean).length} box${boxes.filter(Boolean).length!==1?"es":""}`:""}</span><span class="gid">${esc(lp.id)}</span></th></tr>${colHead}</thead>
+      ${body}</table>`;
+  }).join("");
+
+  const directSec=direct.length?`<table class="lines direct">
+      <thead><tr class="grp"><th colspan="5"><span class="type">Ships direct from supplier</span><span class="gmeta">Not in this container · ${direct.length} line${direct.length!==1?"s":""}</span><span class="gid">${esc(lp.id)}</span></th></tr>
+      <tr class="cols"><th class="ck">✓</th><th class="qty">Qty</th><th class="pn">Part #</th><th class="desc">Description</th><th>Supplier / PO</th></tr></thead>
+      <tbody>${direct.map(it=>{const p=partOf(it.partId);return `<tr><td class="ck"><span class="box"></span></td><td class="qty">${esc(it.qty)}<div class="uom">${esc(p?.uom||"EA")}</div></td><td class="pn"><b>${esc(it.partId)}</b></td><td class="desc">${esc(p?.description||it.description||"—")}</td><td>${esc(it.supplier||"—")}${it.supplier_po?`<div class="old">PO ${esc(it.supplier_po)}</div>`:""}</td></tr>`;}).join("")}</tbody></table>`:"";
+
+  const summary=lists.map(name=>{const r=warehouse.filter(x=>listOf(x.it)===name).map(x=>x.it); const nb=new Set(r.map(it=>it.box).filter(b=>b&&b!==name)).size;
+    return `<tr><td><b>${esc(name)}</b></td><td>${r.length}</td><td>${sumQty(r)}</td><td>${nb||"—"}</td></tr>`;}).join("")
+    +(direct.length?`<tr class="dim"><td>Ships direct (not in container)</td><td>${direct.length}</td><td>${sumQty(direct)}</td><td>—</td></tr>`:"");
+  const addr=customer?[customer.address_line1,customer.address_line2,[customer.city,customer.state].filter(Boolean).join(", ")+(customer.zip?" "+customer.zip:"")].filter(x=>x&&x.trim()).map(esc).join("<br>"):"";
+  const created=String(lp.createdAt||lp.created_at||"").slice(0,10);
+  const kv=(k,v)=>v?`<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`:"";
+
+  let prefs={photos:true,barcodes:true};
+  try{ prefs={...prefs,...JSON.parse(localStorage.getItem("ct_lp_print")||"{}")}; }catch(_){}
+
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(lp.id)} — License Plate</title>
+<style>
+@page{size:letter;margin:0.45in 0.4in 0.5in;
+  @bottom-left{content:"${esc(lp.id)}";font:9px Arial,sans-serif;color:#556}
+  @bottom-right{content:"Page " counter(page) " of " counter(pages);font:9px Arial,sans-serif;color:#556}}
+*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#1C2B3A;margin:0;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.wrap{max-width:7.7in;margin:0 auto}
+.bar{position:sticky;top:0;background:#1C2B3A;color:#fff;padding:10px 14px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:13px;z-index:5}
+.bar label{display:flex;gap:6px;align-items:center;cursor:pointer}.bar button{margin-left:auto;background:#F5A623;color:#1C2B3A;border:0;border-radius:6px;padding:8px 18px;font-weight:800;font-size:14px;cursor:pointer}
+.head{display:grid;grid-template-columns:1fr 2.9in;gap:14px;border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:6px;padding:10px 12px;margin:12px 0 10px}
+.co{font-size:18px;font-weight:900}.co small{display:block;font-size:9px;letter-spacing:2px;color:#8A5A00;text-transform:uppercase}
+.kvs{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin-top:8px}.kv span{display:block;font-size:8.5px;text-transform:uppercase;letter-spacing:.6px;color:#667}.kv b{font-size:11.5px}
+.lpbc{text-align:center}.lpbc svg{width:100%;height:.9in}.nobc{font:700 11px monospace}.lpid{font:800 15px monospace;margin-top:2px}
+.badges{margin-top:4px}.badge{display:inline-block;font-size:9px;font-weight:800;text-transform:uppercase;border:1px solid #9AA;border-radius:3px;padding:1px 6px;margin:0 2px}
+.sum{width:100%;border-collapse:collapse;margin:0 0 12px;font-size:11px}.sum th{background:#E8EDF2;text-align:left;padding:4px 8px;font-size:9px;text-transform:uppercase;letter-spacing:.5px}.sum td{padding:4px 8px;border-bottom:1px solid #E0E3E7}.sum .dim td{color:#667}
+table.lines{width:100%;border-collapse:collapse;margin:0 0 12px;page-break-inside:auto}
+.lines thead{display:table-header-group}
+.grp th{background:#FEF3DC;color:#1C2B3A;text-align:left;padding:6px 8px;border-left:7px solid #F5A623;border-top:2px solid #1C2B3A}
+.grp .type{font-size:15px;font-weight:900;text-transform:uppercase;letter-spacing:.8px}.grp .gmeta{font-size:10px;font-weight:400;margin-left:10px;color:#4A5568}.grp .gid{float:right;font:700 10px monospace;color:#4A5568}
+.cols th{font-size:8.5px;text-transform:uppercase;letter-spacing:.5px;color:#556;text-align:left;padding:3px 6px;border-bottom:1.5px solid #1C2B3A}
+.boxrow td{background:#F5F6F7;font-weight:800;font-size:11px;padding:4px 8px;border-bottom:1px solid #C9D3DE}.boxrow span{font-weight:400;color:#556}
+.lines td{padding:2px 6px;border-bottom:1px solid #E0E3E7;vertical-align:middle}
+.lines tr{page-break-inside:avoid;break-inside:avoid}
+.lines tbody.keep{break-inside:avoid;page-break-inside:avoid}   /* a box of up to 16 lines stays on one page */
+.boxrow{break-after:avoid;page-break-after:avoid}
+td.ck,th.ck{width:.3in;text-align:center}.box{display:inline-block;width:13px;height:13px;border:1.5px solid #1C2B3A;border-radius:2px}
+td.qty,th.qty{width:.55in;text-align:center}td.qty{font:800 14px Arial;line-height:1.05}.uom{font-size:8px;font-weight:400;color:#667}.short{font-size:8.5px;color:#C8102E;font-weight:800}
+td.pn,th.pn{width:1in}td.pn b{font:700 11px monospace}.old{font-size:8.5px;color:#667}
+td.bin,th.bin{width:.6in;font-family:monospace}
+td.bcc,th.bcc{width:1.55in}svg.line{width:1.45in;height:.28in;display:block}
+td.ph,th.ph{width:.45in}td.ph img{width:.36in;height:.36in;object-fit:cover;border-radius:3px;border:1px solid #E0E3E7;display:block}
+.direct .grp th{border-left-color:#8A9BB0;background:#EEF1F4}
+.sign{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:22px;page-break-inside:avoid}.sign div{border-top:1.5px solid #1C2B3A;padding-top:4px;font-size:9.5px;color:#556}
+body.no-photos .ph{display:none}body.no-bc .lbc{display:none}body.no-bins .bin{display:none}
+@media print{.bar{display:none}.head{margin-top:0}}
+</style></head>
+<body class="${prefs.photos?"":"no-photos"} ${prefs.barcodes?"":"no-bc"} ${hasBins?"":"no-bins"}">
+<div class="bar"><b>${esc(lp.id)}</b>
+  <label><input type="checkbox" id="opPh" ${prefs.photos?"checked":""}> Photos</label>
+  <label><input type="checkbox" id="opBc" ${prefs.barcodes?"checked":""}> Line barcodes</label>
+  <button onclick="window.print()">🖨 Print</button></div>
+<div class="wrap">
+<div class="head">
+  <div>
+    <div class="co">ChlorTainer<small>TGO Technologies · License Plate / Packing List</small></div>
+    <div class="kvs">
+      ${kv("Customer",customer?.name)}${kv("Ship to",lp.destination&&lp.destination!==customer?.name?lp.destination:"")}
+      ${kv("Order",lp.order_id)}${kv("Quote",lp.quote_number)}${kv("Customer PO",lp.po_number)}${kv("Created",created)}
+      ${kv("Fabricator",fabricator?.name)}
+    </div>
+    ${addr?`<div class="kv" style="margin-top:6px"><span>Address</span><b style="font-weight:400">${addr}</b></div>`:""}
+  </div>
+  <div class="lpbc">${bcSvg(lp.id,"lp")}<div class="lpid">${esc(lp.id)}</div>
+    <div class="badges"><span class="badge">${esc(lp.type||"Outbound")}</span><span class="badge">${esc(lp.status||"")}</span></div></div>
+</div>
+<table class="sum"><thead><tr><th>Packing list</th><th>Lines</th><th>Pieces</th><th>Boxes</th></tr></thead><tbody>${summary}
+  <tr><td><b>Total</b></td><td><b>${items.length}</b></td><td><b>${sumQty(items)}</b></td><td></td></tr></tbody></table>
+${sections}${directSec}
+<div class="sign"><div>Packed by / date</div><div>Received by / date</div></div>
+</div>
+<script>
+function save(){ try{ localStorage.setItem("ct_lp_print",JSON.stringify({photos:document.getElementById("opPh").checked,barcodes:document.getElementById("opBc").checked})); }catch(e){} }
+document.getElementById("opPh").onchange=function(e){ document.body.classList.toggle("no-photos",!e.target.checked); save(); };
+document.getElementById("opBc").onchange=function(e){ document.body.classList.toggle("no-bc",!e.target.checked); save(); };
+<\/script>
+</body></html>`);
+  w.document.close();
+}
+
 function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mfgBarcodes, actions, onClose, onStartPick, onOpenOrder }) {
   // Every change saves as soon as it is made (text fields when you leave the box,
   // quantities ~0.7 s after the last change). Status changes use the buttons at the top.
@@ -2547,19 +2698,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         </div>
         {lp.order_id&&onOpenOrder&&<button onClick={async()=>{ if(!(await flushItems())) return; onClose(); onOpenOrder(lp.order_id); }}
           style={{border:"1px solid #9DC3E6",background:"#EBF2FA",color:C.navy,borderRadius:6,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📑 Order {lp.order_id} ›</button>}
-        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>{
-          const itemBlocks=(items||[]).map(it=>{const p=parts.find(x=>x.id===it.partId);const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");const imgTag=p?.image_url?`<img src="${p.image_url}" style="width:80px;height:80px;object-fit:cover;border-radius:6px;border:1px solid #E0E3E7;float:right;margin-left:10px;"/>` : "";return `<div class="item"><div class="item-header">${imgTag}<span class="item-id">${it.partId}</span><span class="item-qty">×${it.qty}</span></div><div class="item-desc">${p?.description||"—"}</div><div class="item-meta">${p?.category||""} · ${p?.uom||"EA"} · Location: ${p?.location||"—"}</div><svg id="bc-${safeid}"></svg><div style="clear:both"></div></div>`;}).join("");
-          const bcScripts=(items||[]).map(it=>{const safeid=it.partId.replace(/[^a-zA-Z0-9]/g,"-");return `JsBarcode("#bc-${safeid}","${it.partId}",{format:"CODE128",width:2,height:40,displayValue:true,fontSize:10,margin:4,lineColor:"#1C2B3A"});`;}).join("\n");
-          const w=window.open("","_blank");
-          w.document.write(`<!DOCTYPE html><html><head><title>${lp.id}</title>
-            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>
-            <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;padding:20px;max-width:480px;margin:0 auto;}.lp{border:2px solid #1C2B3A;border-top:5px solid #F5A623;border-radius:8px;padding:16px;margin-bottom:20px;}.lp-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}.company{font-size:18px;font-weight:900;color:#1C2B3A;}.badge{font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;text-transform:uppercase;background:${type==="Outbound"?"#FFF0F2":"#E8EDF2"};color:${type==="Outbound"?"#C8102E":"#1C2B3A"};border:1px solid ${type==="Outbound"?"#F5A0AE":"#B0BEC5"};}.lp svg{width:100%;margin:8px 0;}.lp-footer{display:flex;justify-content:space-between;font-size:9px;color:#8A9BB0;padding-top:8px;border-top:1px solid #E0E3E7;}.lp-refs{display:flex;gap:16px;font-size:10px;color:#1C2B3A;margin-top:6px;padding-top:6px;border-top:1px solid #E0E3E7;}.section-title{font-size:11px;font-weight:800;color:#1C2B3A;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #F5A623;}.item{border:1.5px solid #E0E3E7;border-radius:6px;padding:12px;margin-bottom:12px;page-break-inside:avoid;}.item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}.item-id{font-family:monospace;font-size:13px;font-weight:700;color:#F5A623;}.item-qty{font-family:monospace;font-size:14px;font-weight:800;color:#1C2B3A;}.item-desc{font-size:13px;font-weight:700;color:#1C2B3A;margin-bottom:3px;}.item-meta{font-size:10px;color:#8A9BB0;margin-bottom:8px;}.item svg{width:100%;}@media print{body{padding:6px;}.item{page-break-inside:avoid;}}</style></head>
-            <body onload="window.print()"><div class="lp"><div class="lp-header"><div class="company">ChlorTainer</div><span class="badge">${type}</span></div><svg id="lp-bc"></svg><div class="lp-footer"><span>→ ${destination}</span><span>${lp.createdAt||lp.created_at}</span><span style="font-weight:700;">${status.toUpperCase()}</span></div>${quoteNumber||poNumber?`<div class="lp-refs">${quoteNumber?`<span>Quote: <strong>${quoteNumber}</strong></span>`:""}${packingSlipType?`<span>📋 ${packingSlipType}</span>`:""}${poNumber?`<span>PO: <strong>${poNumber}</strong></span>`:""}</div>`:""}</div>
-            <div class="section-title">Shipment Contents — ${items.length} Line Item${items.length!==1?"s":""}</div>${itemBlocks}
-            <script>JsBarcode("#lp-bc","${lp.id}",{format:"CODE128",width:2.5,height:60,displayValue:true,fontSize:11,margin:6,lineColor:"#1C2B3A"});${bcScripts}<\/script>
-            </body></html>`);
-          w.document.close();
-        }}>🖨️ Print License Plate</Btn>
+        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>printLicensePlate({lp:{...lp,type,status,destination,quote_number:quoteNumber,po_number:poNumber,packing_slip_type:packingSlipType},items,parts,customer,packingSlipTypes,fabricator:(fabricators||[]).find(f=>f.id===(fabricatorId||lp.fabricator_id))})}>🖨️ Print License Plate</Btn>
       </div>
 
       {/* Status actions */}
