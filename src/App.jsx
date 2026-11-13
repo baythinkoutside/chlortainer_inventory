@@ -4647,18 +4647,36 @@ function FabricatorApp({ user, onSignOut }) {
   const [flagFor,setFlagFor]=useState(null); // line being flagged
   const wrap={maxWidth:640,margin:"0 auto",padding:16,fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
 
-  async function loadList(){
+  async function loadList(keepMsg=false){
     const {data,error}=await _sb.rpc("fab_list_lps");
     if(error){ setErr(error.message); return; }
-    setList(data||[]); setErr("");
+    setList(data||[]); if(!keepMsg) setErr("");
   }
+  const [opening,setOpening]=useState("");
   async function loadLp(id){
     const {data,error}=await _sb.rpc("fab_get_lp",{p_lp:id});
-    if(error||!data){ setErr(error?.message||"That shipment is not available."); return; }
-    setLp(data); setErr("");
+    if(error||!data){
+      // Not available (e.g. TGO moved it back to Open for changes) or a network error:
+      // drop back to the list, say why, and refresh the list so it matches the server.
+      setErr(error?.message?`Couldn't open ${id}: ${error.message}`:`${id} isn't available right now. TGO may have moved it back for changes. The list below is up to date.`);
+      setOpenId(null); setLp(null); loadList(true); return false;
+    }
+    setLp(data); setErr(""); return true;
+  }
+  async function openShipment(id){
+    setErr(""); setOpening(id);
+    const ok=await loadLp(id);
+    setOpening("");
+    if(ok){ setOpenId(id); window.scrollTo(0,0); }
   }
   useEffect(()=>{ loadList(); },[]);
-  useEffect(()=>{ if(openId) loadLp(openId); else setLp(null); },[openId]);
+  // Coming back to the app (phone unlocked, tab switched): refresh what is showing.
+  useEffect(()=>{
+    const f=()=>{ if(document.visibilityState==="visible"){ if(openIdRef.current) loadLp(openIdRef.current); else loadList(); } };
+    document.addEventListener("visibilitychange",f);
+    return ()=>document.removeEventListener("visibilitychange",f);
+  },[]);
+  const openIdRef=useRef(null); openIdRef.current=openId;
 
   async function setLpStatus(next){
     const items=lp.items||[]; const done=items.filter(i=>i.checked).length; const open=items.filter(i=>i.issue&&!i.issue.resolved_at).length;
@@ -4686,12 +4704,12 @@ function FabricatorApp({ user, onSignOut }) {
     <button onClick={onSignOut} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Sign out</button>
   </div>;
 
-  if(openId&&lp){
+  if(openId&&lp&&lp.id===openId){
     const items=lp.items||[]; const done=items.filter(i=>i.checked).length;
     const groups=[]; items.forEach(it=>{ const g=(it.list||"Items"); let x=groups.find(a=>a.g===g); if(!x){x={g,rows:[]};groups.push(x);} x.rows.push(it); });
     return <div style={wrap}>
       {top}
-      <button onClick={()=>{setOpenId(null);loadList();}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:14,marginBottom:10}}>← All shipments</button>
+      <button onClick={()=>{setOpenId(null);setLp(null);loadList();}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:14,marginBottom:10}}>← All shipments</button>
       <h2 style={{margin:"0 0 4px"}}>{lp.id}</h2>
       <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
       <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden",marginTop:12}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
@@ -4732,8 +4750,8 @@ function FabricatorApp({ user, onSignOut }) {
     <h2 style={{margin:"0 0 10px"}}>Your shipments</h2>
     {err&&<p style={{color:"#b00020"}}>{err}</p>}
     {!list?<div>Loading…</div>:list.length===0?<div style={{color:"#667"}}>No shipments are assigned to your company right now.</div>:
-      list.map(l=><button key={l.id} onClick={()=>setOpenId(l.id)} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:"2px solid #c9d6e2",borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit"}}>
-        <div style={{fontWeight:800,fontSize:16}}>{l.id}</div>
+      list.map(l=><button key={l.id} onClick={()=>openShipment(l.id)} disabled={!!opening} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:`2px solid ${opening===l.id?"#1c2b3a":"#c9d6e2"}`,borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit",opacity:opening&&opening!==l.id?.6:1}}>
+        <div style={{fontWeight:800,fontSize:16}}>{l.id}{opening===l.id&&<span style={{fontWeight:400,fontSize:13,color:"#667"}}> · Opening…</span>}</div>
         <div style={{fontSize:13,color:"#445"}}>{l.destination}{l.po_number?` · PO ${l.po_number}`:""}</div>
         <div style={{fontSize:13,marginTop:4}}><b>{l.status}</b> · <b>{l.checked}</b> of <b>{l.total}</b> checked{l.issues>0?<span style={{color:"#b00020"}}> · ⚠ {l.issues} problem{l.issues>1?"s":""}</span>:null}</div>
       </button>)}
