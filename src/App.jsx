@@ -415,6 +415,11 @@ function useData() {
     await _sb.from("parts").update({ image_url: null }).eq("id", partId);
     await logAudit("image_remove","part",partId,{});
   }
+  async function setPartActive(partId,active,reason=""){
+    await dbRun(_sb.from("parts").update({active,inactive_reason:active?null:(reason||null)}).eq("id",partId));
+    await logAudit(active?"part_reactivate":"part_deactivate","part",partId,{reason:reason||undefined});
+    await fetchAll();
+  }
   async function updateStock(partId,newStock,details={}){
     const part=parts.find(p=>p.id===partId);
     await _sb.from("parts").update({stock:newStock}).eq("id",partId);
@@ -857,7 +862,7 @@ function useData() {
 
   return {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
-    loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,countStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
+    loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,countStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,setPartActive,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,importControlLists,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
       saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo}};
@@ -1079,6 +1084,11 @@ function partMatchesSearch(p, q){
   if(!s) return true;
   return [p.id,p.new_part_no,p.legacy_part_no,p.description].some(v=>(v||"").toString().toLowerCase().includes(s));
 }
+const isActive=p=>p&&p.active!==false;
+function InactiveTag({ p }){
+  if(!p||p.active!==false) return null;
+  return <span title={p.inactive_reason||"Inactive part"} style={{fontSize:10,fontWeight:700,letterSpacing:.5,color:"#fff",background:C.red,borderRadius:4,padding:"2px 6px"}}>INACTIVE</span>;
+}
 function LegacyNote({ p }){
   if(!p) return null;
   return <span style={{fontSize:11,color:C.textLight,fontFamily:"monospace"}}>
@@ -1108,7 +1118,7 @@ function LookupResult({ result, parts, suppliers, onClear, replenByPart }) {
     <div style={{display:"grid",gap:14}}>
       <div style={{display:"flex",justifyContent:"center",background:C.offWhite,borderRadius:8,padding:16}}>
         <BarcodeDisplay code={live.id} size="lg"/>
-        <div style={{marginTop:6,textAlign:"center"}}><LegacyNote p={live}/></div>
+        <div style={{marginTop:6,textAlign:"center"}}><InactiveTag p={live}/> <LegacyNote p={live}/></div>
       </div>
       <div style={{background:C.white,border:`1.5px solid ${C.border}`,borderRadius:8,padding:16}}>
         <div style={{fontWeight:800,fontSize:16,color:C.navy,marginBottom:8}}>{live.description}</div>
@@ -1650,8 +1660,10 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions, reple
   const [viewPart,setViewPart]=useState(null);
   const [form,setForm]=useState({newPartNo:"",legacyPartNo:"",description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});
   const [saving,setSaving]=useState(false);
+  const [showInactive,setShowInactive]=useState(false);
+  const inactiveCount=parts.filter(p=>!isActive(p)).length;
   const cats=["All",...Array.from(new Set(parts.map(p=>p.category)))];
-  const filtered=parts.filter(p=>(filter==="All"||p.category===filter)&&partMatchesSearch(p,search));
+  const filtered=parts.filter(p=>(showInactive||isActive(p))&&(filter==="All"||p.category===filter)&&partMatchesSearch(p,search));
   async function addPart(){if(!form.description||!form.newPartNo.trim())return;setSaving(true);try{await actions.addPart(form);setForm({newPartNo:"",legacyPartNo:"",description:"",category:"Containment",uom:"EA",location:"",minStock:"",stock:""});setShowAdd(false);}catch(e){alert(e.message);}setSaving(false);}
   const sc=p=>stockStatus(p,replenByPart?.get(p.id)).color;
   const sl=p=>stockStatus(p,replenByPart?.get(p.id)).label;
@@ -1659,6 +1671,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions, reple
     <div style={{display:"flex",gap:10,marginBottom:18,flexWrap:"wrap",alignItems:"center"}}>
       <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search part no., old no. or description…" style={{...inputStyle,flex:1,minWidth:180}}/>
       <select value={filter} onChange={e=>setFilter(e.target.value)} style={inputStyle}>{cats.map(c=><option key={c}>{c}</option>)}</select>
+      {inactiveCount>0&&<label style={{fontSize:12,color:C.textMid,display:"flex",alignItems:"center",gap:5,cursor:"pointer"}}><input type="checkbox" checked={showInactive} onChange={e=>setShowInactive(e.target.checked)}/>Show inactive ({inactiveCount})</label>}
       <Btn variant="outline" onClick={()=>setShowImport(true)}>📂 Import CSV</Btn>
       <Btn onClick={()=>setShowAdd(true)}>+ Add Part</Btn>
     </div>
@@ -1675,7 +1688,7 @@ function PartsTab({ parts, suppliers, mfgBarcodes, supplierStock, actions, reple
           </div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontWeight:700,fontSize:14,color:C.textDark,marginBottom:2}}>{p.description}</div>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:C.amber}}>{p.id}</span><LegacyNote p={p}/></div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:12,fontWeight:700,color:C.amber}}>{p.id}</span><InactiveTag p={p}/><LegacyNote p={p}/></div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
               <Badge color="navy">{p.category}</Badge>
               <span style={{fontSize:12,color:C.textLight}}>📍 {p.location||"—"}</span>
@@ -1818,6 +1831,15 @@ function PartDetailModal({ part, suppliers, parts, mfgBarcodes, supplierStock, a
         </div>
         <BarcodeDisplay code={live.id} size="lg"/>
         <div style={{marginTop:6,textAlign:"center"}}><LegacyNote p={live}/></div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 14px",borderRadius:7,border:`1px solid ${isActive(live)?C.border:C.red}`,background:isActive(live)?C.white:C.redLight}}>
+        {isActive(live)
+          ? <span style={{fontSize:13,color:C.textMid,flex:1}}>Active part: shows on labels, pick lists and reorder.</span>
+          : <span style={{fontSize:13,color:C.textDark,flex:1}}><InactiveTag p={live}/> <span style={{marginLeft:6}}>{live.inactive_reason||"Inactive"}</span><br/><span style={{fontSize:11,color:C.textLight}}>Hidden from labels, part pickers and reorder; kept for stock on hand and job history.</span></span>}
+        <Btn variant="outline" style={{padding:"5px 12px",fontSize:11}} disabled={saving} onClick={async()=>{
+          if(isActive(live)){ const r=window.prompt("Reason for marking this part inactive:","Obsolete per TGO"); if(r===null) return; setSaving(true); await actions.setPartActive(live.id,false,r.trim()); setSaving(false); }
+          else { if(!window.confirm("Make this part active again?")) return; setSaving(true); await actions.setPartActive(live.id,true); setSaving(false); }
+        }}>{isActive(live)?"Mark inactive":"Make active"}</Btn>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:12}}>
         {[["Description",live.description],["Category",<Badge color="navy">{live.category}</Badge>],
@@ -2298,8 +2320,10 @@ function SuppliersTab({ suppliers, parts, actions }) {
     {showImport&&<CsvImportModal type="suppliers" actions={actions} existingRecords={suppliers} onClose={()=>setShowImport(false)}/>}
   </div>;
 }
-function InventoryTab({ parts, suppliers, replen, onOpenReplenishment }) {
+function InventoryTab({ parts:allParts, suppliers, replen, onOpenReplenishment }) {
   const {byPart,result}=replen;
+  // Inactive parts with stock still count as on hand; inactive at zero drop off.
+  const parts=allParts.filter(p=>isActive(p)||+p.stock>0);
   const [search,setSearch]=useState("");
   const statusOf=p=>stockStatus(p,byPart.get(p.id));
   const needs=p=>{ const r=byPart.get(p.id); return !!r&&((r.order_qty||0)>0||r.flags.some(f=>f==="expedite_open_po"||f==="shortage_but_do_not_reorder")); };
@@ -2456,7 +2480,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   function addItem(){if(!pickPart||pickQty<1||items.find(i=>i.partId===pickPart))return;setItems(p=>[...p,{partId:pickPart,qty:+pickQty}]);setPickPart("");setPickQty(1);}
   async function create(){if(!form.destination||items.length===0)return;setSaving(true);await actions.createLP(form,items);setSaving(false);onClose();}
   async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setForm(f=>({...f,packing_slip_type:newTypeInput.trim()}));setNewTypeInput("");setAddingType(false);}
-  const available=parts.filter(p=>!items.find(i=>i.partId===p.id));
+  const available=parts.filter(p=>isActive(p)&&!items.find(i=>i.partId===p.id));
 
   const unsaved=items.length>0||!!form.destination||!!form.quote_number||!!form.po_number;
   return <Modal title="Create License Plate" onClose={onClose} confirmClose={unsaved?"Discard this new license plate?":null}>
@@ -2826,7 +2850,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   }
   function updateQty(idx,qty){ queueItemsSave(itemsRef.current.map((it,i)=>i===idx?{...it,qty:Math.max(pickedOf(it),1,+qty||1)}:it)); }
 
-  const availParts=parts.filter(p=>!items.find(i=>i.partId===p.id));
+  const availParts=parts.filter(p=>isActive(p)&&!items.find(i=>i.partId===p.id));
 
   const saveNote={idle:null,pending:["Saving…",C.textLight],saving:["Saving…",C.textLight],saved:["✓ All changes saved",C.greenText],error:[`⚠ Not saved: ${saveState.err}`,C.red]}[saveState.s];
   const wide={flex:"1 1 150px",justifyContent:"center",minHeight:44};
@@ -3074,7 +3098,8 @@ function PartPicker({ parts, value, onChange, placeholder="Search part no. or de
   useEffect(()=>{ if(selfChange.current){ selfChange.current=false; return; } setQ(value||""); },[value]);   // parent reset/set
   const results=useMemo(()=>{
     const s=q.trim().toLowerCase();
-    const list=s?parts.filter(p=>partMatchesSearch(p,s)):parts;
+    const pool=parts.filter(isActive);
+    const list=s?pool.filter(p=>partMatchesSearch(p,s)):pool;
     const score=p=>{ const id=p.id.toLowerCase();
       if(id===s||String(p.new_part_no??"").toLowerCase()===s||String(p.legacy_part_no??"").toLowerCase()===s) return 0;
       if(id.startsWith(s)||id.replace(/^ct-/,"").startsWith(s)) return 1;
@@ -3661,7 +3686,7 @@ function OrderPackingPanel({ order, packingLines, parts, packingSlipTypes, actio
             {order.quote_number&&s.quote&&order.quote_number!==s.quote&&<div style={{fontSize:12,color:C.amber,fontWeight:700,marginBottom:6}}>⚠ Slip quote number {s.quote} does not match this order ({order.quote_number}).</div>}
             {s.lines.map((l,li)=>{
               const cands=l.candidates.map(id=>parts.find(p=>p.id===id)).filter(Boolean);
-              const rest=parts.filter(p=>!l.candidates.includes(p.id));
+              const rest=parts.filter(p=>isActive(p)&&!l.candidates.includes(p.id));
               const warn=l.flags.length>0;
               return <div key={l.id} style={{display:"grid",gridTemplateColumns:isPhone?"24px minmax(0,1fr) 64px":"24px minmax(0,1.2fr) 64px minmax(0,1.4fr)",gap:8,alignItems:"start",padding:"6px 4px",borderTop:`1px solid ${C.border}`,background:!l.include?"#f4f4f4":warn?"#FFF8E6":"transparent",opacity:l.include?1:.6}}>
                 <input type="checkbox" checked={l.include} onChange={e=>updLine(si,li,{include:e.target.checked})} style={{marginTop:4}}/>
@@ -3925,7 +3950,10 @@ function PoGroupCard({ g, supplier, parts, draftKeys, canCreate, onCreate, busy,
 // One forecast drives the header badge, the Inventory and Parts tabs, and the Replenishment tab,
 // so every screen gives the same answer. A part's Min Stock acts as its minimum unless the
 // item's procurement settings give one.
-function useReplenishmentForecast({ parts, procurement, controlLines, packingSlipTypes, purchaseOrders, poLines, kitLines, orderLines, maintLines, orders }, { horizon="180", tieBreak="maintenance" }={}) {
+function useReplenishmentForecast({ parts:allParts, procurement:allProc, controlLines, packingSlipTypes, purchaseOrders, poLines, kitLines, orderLines, maintLines, orders }, { horizon="180", tieBreak="maintenance" }={}) {
+  const parts=useMemo(()=>allParts.filter(isActive),[allParts]);
+  const procurement=useMemo(()=>{ const ok=new Set(parts.map(p=>p.id)); return allProc.filter(p=>ok.has(p.part_id)); },[allProc,parts]);
+  const inactiveIds=useMemo(()=>new Set(allParts.filter(p=>!isActive(p)).map(p=>p.id)),[allParts]);
   const supplierLinks=useMemo(()=>parts.flatMap(p=>(p.suppliers||[]).map(s=>({part_id:p.id,supplier_id:s.supplierId,mfg_part_no:s.mfgPartNo,lead_days:s.leadDays,unit_cost:s.unitCost}))),[parts]);
   const liveOrders=useMemo(()=>new Set(orders.filter(o=>!["Cancelled","Closed"].includes(o.status)).map(o=>o.id)),[orders]);
   const openPoLines=useMemo(()=>{
@@ -3940,10 +3968,10 @@ function useReplenishmentForecast({ parts, procurement, controlLines, packingSli
     return out;
   },[procurement,parts,directIds]);
   const result=useMemo(()=>forecast({
-    parts,procurement:procWithMins,supplierLinks,controlLines:controlLines.filter(c=>!directIds.has(c.part_id)),listTypes:packingSlipTypes,openPoLines,kitLines,
+    parts,procurement:procWithMins,supplierLinks,controlLines:controlLines.filter(c=>!directIds.has(c.part_id)&&!inactiveIds.has(c.part_id)),listTypes:packingSlipTypes,openPoLines,kitLines,
     orderLines:orderLines.filter(l=>liveOrders.has(l.order_id)),
-    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)&&!directIds.has(l.part_id)),
-  },{today:localToday(),horizonDays:+horizon,tieBreak}),[directIds,parts,procWithMins,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
+    maintenanceLines:maintLines.filter(l=>liveOrders.has(l.order_id)&&!directIds.has(l.part_id)&&!inactiveIds.has(l.part_id)),
+  },{today:localToday(),horizonDays:+horizon,tieBreak}),[inactiveIds,directIds,parts,procWithMins,supplierLinks,controlLines,packingSlipTypes,openPoLines,kitLines,orderLines,maintLines,liveOrders,horizon,tieBreak]);
   const byPart=useMemo(()=>new Map(result.recommendations.map(r=>[r.part_id,r])),[result]);
   // Same rule as the Replenishment tab's "Late" + "Order soon" cards.
   const toOrderNow=useMemo(()=>result.recommendations.filter(r=>["late","order_soon"].includes(r.urgency)&&(r.firm_order_qty>0||r.flags.includes("expedite_open_po"))).length,[result]);
@@ -4004,7 +4032,7 @@ function ReplenishmentTab({ parts, suppliers, orders, orderLines, controlLines, 
   const itemRows=useMemo(()=>{
     const procSet=new Set(procurement.map(p=>p.part_id)); const recSet=new Set(recs.map(r=>r.part_id));
     const q=search.toLowerCase();
-    return parts.filter(p=>!q||partMatchesSearch(p,q))
+    return parts.filter(p=>isActive(p)&&(!q||partMatchesSearch(p,q)))
       .sort((a,b)=>((procSet.has(b.id)||recSet.has(b.id))-(procSet.has(a.id)||recSet.has(a.id)))||a.id.localeCompare(b.id));
   },[parts,procurement,recs,search]);
 
@@ -4336,7 +4364,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} replen={replen} onOpenReplenishment={()=>setTab("replenish")}/>
           :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions} focus={lpFocus} onFocusDone={()=>setLpFocus(null)} onOpenOrder={openOrder}/>
-          :tab==="binlabels"?<BinLabelsTab parts={parts} ui={{C,Btn,Input,Sel,SectionTitle}}/>
+          :tab==="binlabels"?<BinLabelsTab parts={parts.filter(isActive)} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} focus={orderFocus} onFocusDone={()=>setOrderFocus(null)} onOpenLp={openLp}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>
