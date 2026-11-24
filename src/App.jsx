@@ -317,6 +317,7 @@ function useData() {
   const [procurement,setProcurement]=useState([]);
   const [purchaseOrders,setPurchaseOrders]=useState([]);
   const [poLines,setPoLines]=useState([]);
+  const [labelQueue,setLabelQueue]=useState([]);   // item labels waiting to print (shared across devices)
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState(null);
 
@@ -365,6 +366,7 @@ function useData() {
     setProcurement(procs||[]);
     setPurchaseOrders(pos||[]);
     setPoLines(pols||[]);
+    { const {data:lq}=await sb.from("label_queue").select("*").order("created_at"); setLabelQueue(lq||[]); }
   };
 
   useEffect(()=>{
@@ -383,6 +385,7 @@ function useData() {
           _sb.channel("ss").on("postgres_changes",{event:"*",schema:"public",table:"supplier_stock"},refresh).subscribe(),
           _sb.channel("pst").on("postgres_changes",{event:"*",schema:"public",table:"packing_slip_types"},refresh).subscribe(),
           _sb.channel("cust").on("postgres_changes",{event:"*",schema:"public",table:"customers"},refresh).subscribe(),
+          _sb.channel("lq").on("postgres_changes",{event:"*",schema:"public",table:"label_queue"},async()=>{ const {data}=await _sb.from("label_queue").select("*").order("created_at"); setLabelQueue(data||[]); }).subscribe(),
         ];
       } catch(e){setError(e.message);setLoading(false);}
     })();
@@ -860,12 +863,32 @@ function useData() {
     await fetchAll();
   }
 
-  return {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+  // ── Item label print queue: received stock waits here until its labels are printed ──
+  async function reloadLabelQueue(){ const {data}=await _sb.from("label_queue").select("*").order("created_at"); setLabelQueue(data||[]); }
+  async function queueItemLabels(partId,qty,source="manual",ref=null){
+    qty=Math.round(+qty);
+    if(!(qty>0)) return;
+    await dbRun(_sb.from("label_queue").insert({part_id:partId,qty,source,ref,created_by:getCurrentUser()?.email||null}));
+    await reloadLabelQueue();
+  }
+  async function updateLabelQueue(id,qty){
+    qty=Math.round(+qty);
+    if(qty>0) await dbRun(_sb.from("label_queue").update({qty}).eq("id",id));
+    else await dbRun(_sb.from("label_queue").delete().eq("id",id));
+    await reloadLabelQueue();
+  }
+  async function removeLabelQueue(ids){
+    if(!ids?.length) return;
+    await dbRun(_sb.from("label_queue").delete().in("id",ids));
+    await reloadLabelQueue();
+  }
+
+  return {fabricators,parts,suppliers,lps,labelQueue,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,countStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,setPartActive,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,importControlLists,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
-      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo}};
+      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo,queueItemLabels,updateLabelQueue,removeLabelQueue}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -1144,6 +1167,17 @@ function LookupResult({ result, parts, suppliers, onClear, replenByPart }) {
   );
 }
 
+// "Add to item label print queue" on receiving: on by default, remembered per device.
+const QUEUE_PREF="ct_queue_item_labels";
+const getQueuePref=()=>{ try{ return localStorage.getItem(QUEUE_PREF)!=="0"; }catch(_){ return true; } };
+const setQueuePref=v=>{ try{ localStorage.setItem(QUEUE_PREF,v?"1":"0"); }catch(_){ } };
+function QueueLabelsCheck({ checked, onChange, qty }){
+  return <label style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:6,border:`1px solid ${C.border}`,background:C.white,cursor:"pointer",fontSize:13,color:C.textDark,minHeight:44}}>
+    <input type="checkbox" checked={checked} onChange={e=>{ setQueuePref(e.target.checked); onChange(e.target.checked); }} style={{width:18,height:18}}/>
+    <span>🏷️ Add {qty!=null?<b>{qty}</b>:"the received quantity"} to the <b>item label print queue</b><span style={{display:"block",fontSize:11,color:C.textLight}}>Print them later from Bin Labels → Item labels → Print queue.</span></span>
+  </label>;
+}
+
 // ─── Receive Result ───────────────────────────────────────────────────────────
 function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, receiveQty, setReceiveQty, saving, onBack, onConfirm, purchaseOrders=[], poLines=[] }) {
   const live=parts.find(x=>x.id===result.data.id)||result.data;
@@ -1159,6 +1193,7 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
   },[purchaseOrders,poLines,live.id,sup?.id]);
   const [choice,setChoice]=useState(null);           // line id, or "none"
   const [noPoSupplier,setNoPoSupplier]=useState(sup?.id||"");
+  const [queueLbl,setQueueLbl]=useState(getQueuePref);
   useEffect(()=>{                                     // default: the first open PO line, received in full
     if(openLines.length){ setChoice(openLines[0].line.id); setReceiveQty(openLines[0].out); }
     else setChoice("none");
@@ -1219,11 +1254,12 @@ function ReceiveResult({ result, parts, suppliers, mfgBarcodes, lastScanned, rec
         {unitCost!=null&&<span style={{marginLeft:12}}>· Receipt value: <strong>${((+receiveQty||0)*unitCost).toFixed(2)}</strong></span>}
         {sel&&<div style={{marginTop:2}}>{sel.po.id} will show {(+sel.line.qty_received||0)+(+receiveQty||0)} of {sel.line.qty} received.</div>}
       </div>
+      <QueueLabelsCheck checked={queueLbl} onChange={setQueueLbl} qty={+receiveQty>0?+receiveQty:null}/>
       <div style={{display:"flex",gap:10}}>
         <Btn variant="outline" style={{flex:1,justifyContent:"center",minHeight:48}} onClick={onBack}>← Back</Btn>
         <Btn style={{flex:1,justifyContent:"center",minHeight:48}} disabled={saving||!choice||!(+receiveQty>0)}
           onClick={()=>{ if(over>0&&!window.confirm(`Receive ${receiveQty} on ${sel.po.id}? Only ${sel.out} are outstanding.`)) return;
-            onConfirm(sel?{po:sel.po,line:sel.line}:{supplierId:noPoSupplier||null,upc:mfgMatch?.barcode||null}); }}>
+            onConfirm(sel?{po:sel.po,line:sel.line}:{supplierId:noPoSupplier||null,upc:mfgMatch?.barcode||null},queueLbl); }}>
           {saving?"Saving…":"✅ Confirm Receipt"}</Btn>
       </div>
     </div>
@@ -1511,13 +1547,19 @@ function ScanTab({ parts, suppliers, lps, mfgBarcodes, actions, replenByPart, pu
     }
   }
 
-  async function applyReceive(choice){
+  async function applyReceive(choice,queueLbl){
     if(!result||result.type!=="part")return;
     const live=parts.find(p=>p.id===result.data.id);
     setSaving(true);
     try{
-      if(choice?.po){ await actions.receivePoLine(choice.po,choice.line,+receiveQty); showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id} on ${choice.po.id}`); }
-      else { await actions.receiveWithoutPo(live.id,+receiveQty,choice||{}); showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id} (no PO)`); }
+      if(choice?.po) await actions.receivePoLine(choice.po,choice.line,+receiveQty);
+      else await actions.receiveWithoutPo(live.id,+receiveQty,choice||{});
+      let q="";
+      if(queueLbl){
+        try{ await actions.queueItemLabels(live.id,+receiveQty,choice?.po?"po_receive":"receive_no_po",choice?.po?.id||null); q=" · 🏷️ labels queued"; }
+        catch(e){ q=` · ⚠ labels not queued: ${e.message||e}`; }
+      }
+      showToast(`✅ Received ${receiveQty} ${live.uom} of ${live.id}${choice?.po?` on ${choice.po.id}`:" (no PO)"}${q}`);
       setResult(null);setReceiveQty(1);setLastScanned("");
     }catch(e){ showToast(`⚠ Not saved: ${e.message||e}`); }
     setSaving(false);
@@ -4175,7 +4217,10 @@ const diffDaysLocal=(d)=>Math.round((new Date(d+"T00:00:00")-new Date(localToday
 function PoDetailModal({ po, lines, supplier, parts, actions, onClose }) {
   const [f,setF]=useState({order_date:po.order_date||"",expected_date:po.expected_date||"",notes:po.notes||""});
   const [recv,setRecv]=useState({});
+  const [queueLbl,setQueueLbl]=useState(getQueuePref);
   const [busy,run]=useRun();
+  // Receive a line, then (optionally) put the same quantity in the item label print queue.
+  const receive=async(l,qty)=>{ await actions.receivePoLine(po,l,qty); if(queueLbl) await actions.queueItemLabels(l.part_id,qty,"po_receive",po.id); };
   const total=lines.reduce((s,l)=>s+(l.unit_cost!=null?l.qty*l.unit_cost:0),0);
   const canReceive=["Sent","Partially Received"].includes(po.status);
   const out=(l)=>Math.max((+l.qty)-(+l.qty_received||0),0);
@@ -4217,7 +4262,7 @@ function PoDetailModal({ po, lines, supplier, parts, actions, onClose }) {
             <td style={tdS}>{canReceive&&o>0
               ? <div style={{display:"flex",gap:6}}>
                   <input type="number" min="1" max={o} value={recv[l.id]??o} onChange={e=>setRecv(r=>({...r,[l.id]:e.target.value}))} style={{...inputStyle,width:64,padding:"4px 6px",fontFamily:"monospace"}}/>
-                  <Btn variant="outline" style={{padding:"4px 10px",fontSize:11}} disabled={busy} onClick={()=>run(()=>actions.receivePoLine(po,l,recv[l.id]??o))}>Receive</Btn>
+                  <Btn variant="outline" style={{padding:"4px 10px",fontSize:11}} disabled={busy} onClick={()=>run(()=>receive(l,recv[l.id]??o))}>Receive</Btn>
                 </div>
               : <span style={{fontSize:11,color:C.textLight}}>{o===0?"✓ complete":"—"}</span>}</td>
           </tr>;
@@ -4228,8 +4273,9 @@ function PoDetailModal({ po, lines, supplier, parts, actions, onClose }) {
           <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={csv}>⬇ CSV</Btn>
           <Btn variant="outline" style={{padding:"6px 12px",fontSize:12}} onClick={()=>printPurchaseOrder({po,supplier,lines,parts})}>🖨 Print</Btn>
         </div>
-        {canReceive&&lines.some(l=>out(l)>0)&&<Btn disabled={busy} onClick={()=>{if(window.confirm("Receive every outstanding line in full into stock?"))run(async()=>{for(const l of lines){const o=out(l);if(o>0)await actions.receivePoLine(po,l,o);}});}}>📥 Receive all outstanding</Btn>}
+        {canReceive&&lines.some(l=>out(l)>0)&&<Btn disabled={busy} onClick={()=>{if(window.confirm("Receive every outstanding line in full into stock?"))run(async()=>{for(const l of lines){const o=out(l);if(o>0)await receive(l,o);}});}}>📥 Receive all outstanding</Btn>}
       </div>
+      {canReceive&&lines.some(l=>out(l)>0)&&<QueueLabelsCheck checked={queueLbl} onChange={setQueueLbl}/>}
       {canReceive&&<div style={{fontSize:11,color:C.textLight}}>Receiving adds to on-hand stock and to this supplier's stock, and is recorded in the Audit Log.</div>}
     </div>
   </Modal>;
@@ -4299,7 +4345,7 @@ function MainApp({ user, onSignOut }) {
   const [orderFocus,setOrderFocus]=useState(null); // {id} — open an order from another tab
   const openLp=(id,pick=false)=>{ setLpFocus({id,pick}); setTab("lp"); };
   const openOrder=(id)=>{ setOrderFocus({id}); setTab("orders"); };
-  const {fabricators,parts,suppliers,lps,mfgBarcodes,supplierStock,packingSlipTypes,customers,
+  const {fabricators,parts,suppliers,lps,labelQueue,mfgBarcodes,supplierStock,packingSlipTypes,customers,
     vesselModels,controlLines,orders,orderLines,packingLines,maintKits,kitLines,maintLines,procurement,purchaseOrders,poLines,
     loading,error,actions}=useData();
   const replen=useReplenishmentForecast({parts,procurement,controlLines,packingSlipTypes,purchaseOrders,poLines,kitLines,orderLines,maintLines,orders});
@@ -4320,7 +4366,9 @@ function MainApp({ user, onSignOut }) {
   const section=sectionOf(tab);
   lastTabRef.current[section.id]=tab;
   const lpProblems=lps.filter(l=>l.status!=="Cancelled"&&(l.items||[]).some(i=>i.issue&&!i.issue.resolved_at)).length;
-  const tabBadge={replenish:alerts?{n:alerts,bg:C.amber,fg:C.navy}:null, lp:lpProblems?{n:lpProblems,bg:C.red,fg:"#fff"}:null};
+  const queuedLabels=(labelQueue||[]).reduce((n,r)=>n+(+r.qty||0),0);   // item labels waiting in the print queue
+  const tabBadge={replenish:alerts?{n:alerts,bg:C.amber,fg:C.navy}:null, lp:lpProblems?{n:lpProblems,bg:C.red,fg:"#fff"}:null,
+    binlabels:queuedLabels?{n:queuedLabels,bg:C.navy,fg:"#fff"}:null};
   const sectionBadge=s=>{ const b=s.tabs.map(t=>tabBadge[t]).filter(Boolean); return b.length?{n:b.reduce((a,x)=>a+x.n,0),bg:b.some(x=>x.bg===C.red)?C.red:C.amber,fg:b.some(x=>x.bg===C.red)?"#fff":C.navy}:null; };
   const pill=b=>b?<span style={{background:b.bg,color:b.fg,borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:800,lineHeight:"14px"}}>{b.n}</span>:null;
   const goSection=s=>setTab(lastTabRef.current[s.id]&&s.tabs.includes(lastTabRef.current[s.id])?lastTabRef.current[s.id]:s.tabs[0]);
@@ -4392,7 +4440,7 @@ function MainApp({ user, onSignOut }) {
           :tab==="customers"?<CustomersTab customers={customers} lps={lps} actions={actions}/>
           :tab==="inventory"?<InventoryTab parts={parts} suppliers={suppliers} replen={replen} onOpenReplenishment={()=>setTab("replenish")}/>
           :tab==="lp"?<LicensePlatesTab fabricators={fabricators} lps={lps} parts={parts} customers={customers} packingSlipTypes={packingSlipTypes} mfgBarcodes={mfgBarcodes} actions={actions} focus={lpFocus} onFocusDone={()=>setLpFocus(null)} onOpenOrder={openOrder}/>
-          :tab==="binlabels"?<BinLabelsTab parts={parts.filter(isActive)} ui={{C,Btn,Input,Sel,SectionTitle}}/>
+          :tab==="binlabels"?<BinLabelsTab parts={parts.filter(isActive)} allParts={parts} labelQueue={labelQueue} actions={actions} ui={{C,Btn,Input,Sel,SectionTitle}}/>
           :tab==="orders"?<OrdersTab packingLines={packingLines} packingSlipTypes={packingSlipTypes} lps={lps} orders={orders} orderLines={orderLines} maintLines={maintLines} customers={customers} vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} actions={actions} focus={orderFocus} onFocusDone={()=>setOrderFocus(null)} onOpenLp={openLp}/>
           :tab==="controllists"?<ControlListsTab vesselModels={vesselModels} controlLines={controlLines} maintKits={maintKits} kitLines={kitLines} parts={parts} packingSlipTypes={packingSlipTypes} actions={actions}/>
           :tab==="replenish"?<ReplenishmentTab parts={parts} suppliers={suppliers} orders={orders} orderLines={orderLines} controlLines={controlLines} packingSlipTypes={packingSlipTypes} maintLines={maintLines} kitLines={kitLines} procurement={procurement} purchaseOrders={purchaseOrders} poLines={poLines} actions={actions}/>

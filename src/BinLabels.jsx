@@ -236,7 +236,78 @@ export async function printBinLabels(list, sizeKey, opts, autoPrint = true) {
   w.document.close();
 }
 
-export default function BinLabelsTab({ parts, ui }) {
+// ─── Item label print queue ──────────────────────────────────────────────────
+// Received stock is added here (Scan → Receive Stock, PO receiving). Shared across devices,
+// so parts can be received on a phone and the labels printed at the label printer.
+function PrintQueue({ queue, allParts, actions, itemKey, setItemKey, ui }) {
+  const { C, Btn, Sel } = ui;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [printedIds, setPrintedIds] = useState(null);   // ids sent to the printer, waiting for "printed OK?"
+  const [skip, setSkip] = useState(0);
+  const partOf = (id) => allParts.find((p) => p.id === id);
+  const rows = queue.filter((r) => partOf(r.part_id));
+  const total = rows.reduce((s, r) => s + (+r.qty || 0), 0);
+  const size = LABEL_SIZES[itemKey];
+  const run = async (fn) => { setBusy(true); setErr(""); try { await fn(); } catch (e) { setErr(e.message || String(e)); } setBusy(false); };
+
+  const print = (auto) => {
+    const list = rows.flatMap((r) => Array(Math.min(500, +r.qty || 0)).fill(partOf(r.part_id)));
+    printBinLabels(list, itemKey, { skip }, auto);
+    if (auto) setPrintedIds(rows.map((r) => r.id));
+  };
+
+  const when = (t) => { const d = new Date(t); return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); };
+  const src = (r) => r.source === "po_receive" ? `Received${r.ref ? ` · ${r.ref}` : ""}` : r.source === "receive_no_po" ? "Received · no PO" : "Added";
+
+  return (
+    <div style={{ background: C.white, border: `2px solid ${rows.length ? C.amber : C.border}`, borderRadius: 8, padding: 14, marginBottom: 16, display: "grid", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 800, color: C.navy, fontSize: 15 }}>🧾 Print queue</div>
+        <div style={{ fontSize: 12, color: C.textMid }}>{rows.length ? <>{rows.length} part{rows.length !== 1 ? "s" : ""} · <b>{total}</b> label{total !== 1 ? "s" : ""}</> : "Empty. Received stock is added here when \"Add to the item label print queue\" is ticked."}</div>
+      </div>
+
+      {printedIds && <div style={{ background: C.greenBg || "#EAF6EC", border: `1px solid ${C.greenBdr || "#A7D7B0"}`, borderRadius: 6, padding: "10px 12px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
+        <span style={{ flex: 1, minWidth: 180 }}>Did the labels print OK? Clear them from the queue so they don't print twice.</span>
+        <Btn variant="navy" disabled={busy} onClick={() => run(async () => { await actions.removeLabelQueue(printedIds); setPrintedIds(null); })}>✓ Printed — clear</Btn>
+        <Btn variant="outline" disabled={busy} onClick={() => setPrintedIds(null)}>Keep in queue</Btn>
+      </div>}
+
+      {rows.length > 0 && <>
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, maxHeight: 280, overflowY: "auto" }}>
+          {rows.map((r) => { const p = partOf(r.part_id); return (
+            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: "monospace", fontWeight: 700, color: C.amber, fontSize: 12 }}>{r.part_id}</div>
+                <div style={{ fontSize: 12, color: C.textDark, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.description}</div>
+                <div style={{ fontSize: 10, color: C.textLight }}>{src(r)} · {when(r.created_at)}{r.created_by ? ` · ${r.created_by}` : ""}</div>
+              </div>
+              <input type="number" min="0" defaultValue={r.qty} key={`${r.id}-${r.qty}`} disabled={busy} title="Labels to print (0 removes)"
+                onBlur={(e) => { if (+e.target.value !== +r.qty) run(() => actions.updateLabelQueue(r.id, e.target.value)); }}
+                style={{ width: 64, padding: "6px", fontFamily: "monospace", fontSize: 14, textAlign: "center", border: `1px solid ${C.border}`, borderRadius: 5 }} />
+              <button disabled={busy} onClick={() => run(() => actions.removeLabelQueue([r.id]))} title="Remove from queue"
+                style={{ border: "none", background: "none", color: C.textLight, fontSize: 18, cursor: "pointer", padding: 4 }}>✕</button>
+            </div>); })}
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ flex: "1 1 260px" }}><Sel label="Item label stock" value={itemKey} onChange={(e) => setItemKey(e.target.value)}>
+            {Object.entries(LABEL_SIZES).filter(([, v]) => kindOf(v) === "item").map(([k, v]) => <option key={k} value={k}>{v.name}</option>)}
+          </Sel></div>
+          {size.mode === "sheet" && <label style={{ fontSize: 12, color: C.textMid, display: "grid", gap: 2 }}>Skip used labels
+            <input type="number" min="0" max={size.perPage - 1} value={skip} onChange={(e) => setSkip(e.target.value)} style={{ width: 90, padding: 6, border: `1px solid ${C.border}`, borderRadius: 5 }} /></label>}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Btn variant="navy" disabled={busy} onClick={() => print(true)}>🖨️ Print queue ({total})</Btn>
+          <Btn variant="outline" disabled={busy} onClick={() => print(false)}>👁 Preview</Btn>
+          <Btn variant="ghost" disabled={busy} onClick={() => { if (window.confirm(`Remove all ${rows.length} part${rows.length !== 1 ? "s" : ""} from the print queue without printing?`)) run(() => actions.removeLabelQueue(rows.map((r) => r.id))); }}>Clear queue</Btn>
+        </div>
+      </>}
+      {err && <div style={{ fontSize: 12, color: C.red }}>⚠ {err}</div>}
+    </div>
+  );
+}
+
+export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [], actions, ui }) {
   const { C, Btn, Input, Sel, SectionTitle } = ui;
   const prefs = useMemo(loadPrefs, []);
   const [kind, setKind] = useState(prefs.kind === "item" ? "item" : "bin");
@@ -282,6 +353,8 @@ export default function BinLabelsTab({ parts, ui }) {
   return (
     <div>
       <SectionTitle>Print Labels</SectionTitle>
+      {actions && <PrintQueue queue={labelQueue} allParts={allParts} actions={actions} itemKey={itemKey}
+        setItemKey={(k) => { setItemKey(k); savePrefs({ kind, sizeKey: binKey, itemKey: k, showPhoto, showMin, showLoc }); }} ui={ui} />}
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         {[["bin", "🗄️ Bin labels", "For shelves and bins"], ["item", "🏷️ Item labels", "Small SKU labels for the parts themselves"]].map(([k, l, d]) =>
           <button key={k} onClick={() => setKind(k)} style={{ flex: 1, textAlign: "left", padding: "10px 14px", borderRadius: 8, cursor: "pointer", minHeight: 52,
