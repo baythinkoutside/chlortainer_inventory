@@ -2773,6 +2773,32 @@ async function printLicensePlate({ lp, items, parts, customer, packingSlipTypes=
   let prefs={photos:true,barcodes:true};
   try{ prefs={...prefs,...JSON.parse(localStorage.getItem("ct_lp_print")||"{}")}; }catch(_){}
 
+  // Packed by / Shipped / Received come from the audit log: who picked the parts and when,
+  // and who changed the status. (Fabricator logins can't read the audit log; those lines stay blank to sign.)
+  let packed=null, shippedEv=null, receivedEv=null;
+  try{
+    const [{data:picks},{data:stat}]=await Promise.all([
+      _sb.from("audit_log").select("created_at,user_email,details").eq("action","stock_adjust").eq("details->>license_plate",lp.id).order("created_at"),
+      _sb.from("audit_log").select("created_at,user_email,details").eq("action","lp_status").eq("entity_id",lp.id).order("created_at"),
+    ]);
+    const net=new Map();   // user → picked qty net of undos
+    (picks||[]).forEach(r=>{ const src=r.details?.source; const q=+r.details?.qty||0; const u=r.user_email||"unknown";
+      if(src==="lp_pick") net.set(u,(net.get(u)||0)+q); else if(src==="lp_unpick") net.set(u,(net.get(u)||0)-q); });
+    const lastPick=[...(picks||[])].reverse().find(r=>r.details?.source==="lp_pick");
+    const who=[...net.entries()].filter(([,q])=>q>0).map(([u])=>u);
+    if(lastPick) packed={who:who.length?who:[lastPick.user_email||"unknown"],at:lastPick.created_at};
+    const last=(to)=>[...(stat||[])].reverse().find(r=>to.includes(r.details?.to));
+    shippedEv=last(["Shipped"]);
+    receivedEv=last(["Received","Received with issues","Delivered"]);
+  }catch(_){ }
+  const when=t=>{ const d=new Date(t); return isNaN(d)?"":d.toLocaleString(undefined,{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}); };
+  const sigBox=(label,val,sub)=>`<div><div class="sv">${val?esc(val):"&nbsp;"}${sub?`<span>${esc(sub)}</span>`:""}</div><div class="sl">${label}</div></div>`;
+  const packedVal=packed?packed.who.join(", "):"";
+  const packedSub=packed?when(packed.at):"";
+  const shipLine=shippedEv?`Shipped ${when(shippedEv.created_at)} · marked by ${shippedEv.user_email||"unknown"}`:"";
+  const recvVal=receivedEv?(receivedEv.details?.to==="Delivered"?"Delivered":(fabricator?.name||"Fabricator")):"";
+  const recvSub=receivedEv?`${receivedEv.details?.to==="Received with issues"?"Received with issues · ":""}${when(receivedEv.created_at)}`:"";
+
   w.document.open();
   w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(lp.id)} — License Plate</title>
 <style>
@@ -2806,7 +2832,11 @@ td.bin,th.bin{width:.6in;font-family:monospace}
 td.bcc,th.bcc{width:1.55in}svg.line{width:1.45in;height:.28in;display:block}
 td.ph,th.ph{width:.45in}td.ph img{width:.36in;height:.36in;object-fit:cover;border-radius:3px;border:1px solid #E0E3E7;display:block}
 .direct .grp th{border-left-color:#8A9BB0;background:#EEF1F4}
-.sign{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:22px;page-break-inside:avoid}.sign div{border-top:1.5px solid #1C2B3A;padding-top:4px;font-size:9.5px;color:#556}
+.sign{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:22px;page-break-inside:avoid}
+.sign .sv{min-height:30px;display:flex;flex-direction:column;justify-content:flex-end;font-size:12px;font-weight:700;color:#1C2B3A;padding-bottom:3px}
+.sign .sv span{font-size:10px;font-weight:400;color:#556}
+.sign .sl{border-top:1.5px solid #1C2B3A;padding-top:4px;font-size:9.5px;color:#556}
+.shipline{font-size:10px;color:#556;margin-top:6px}
 body.no-photos .ph{display:none}body.no-bc .lbc{display:none}body.no-bins .bin{display:none}
 @media print{.bar{display:none}.head{margin-top:0}}
 </style></head>
@@ -2832,7 +2862,8 @@ body.no-photos .ph{display:none}body.no-bc .lbc{display:none}body.no-bins .bin{d
 <table class="sum"><thead><tr><th>Packing list</th><th>Lines</th><th>Pieces</th><th>Boxes</th></tr></thead><tbody>${summary}
   <tr><td><b>Total</b></td><td><b>${items.length}</b></td><td><b>${sumQty(items)}</b></td><td></td></tr></tbody></table>
 ${sections}${directSec}
-<div class="sign"><div>Packed by / date</div><div>Received by / date</div></div>
+<div class="sign">${sigBox("Packed by / date",packedVal,packedSub)}${sigBox("Received by / date",recvVal,recvSub)}</div>
+${shipLine?`<div class="shipline">${esc(shipLine)}</div>`:""}
 </div>
 <script>
 function save(){ try{ localStorage.setItem("ct_lp_print",JSON.stringify({photos:document.getElementById("opPh").checked,barcodes:document.getElementById("opBc").checked})); }catch(e){} }
