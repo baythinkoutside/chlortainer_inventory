@@ -3671,10 +3671,12 @@ function packingTypeSummary(counts){
 
 function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions }) {
   const [busy,run]=useRun();
+  const [saved,setSaved]=useState("");   // "✓ Added … — saved" note after each Add
   const [add,setAdd]=useState({line_type:"part",part_id:"",kit_id:"",qty:1,needed_by:""});
   const valid = +add.qty>0 && (add.line_type==="part" ? parts.some(p=>p.id===add.part_id) : !!add.kit_id);
   return <div>
-    {lines.length===0&&<div style={{fontSize:12,color:C.textLight,padding:"8px 0"}}>No lines on this purchase order yet.</div>}
+    {lines.length===0?<div style={{fontSize:12,color:C.textLight,padding:"8px 0"}}>No lines on this purchase order yet.</div>
+      :<div style={{fontSize:12,color:C.greenText,padding:"0 0 8px"}}>✓ {lines.length} line{lines.length!==1?"s":""} saved. Changes to quantity, date or status save on their own.</div>}
     {lines.map(ml=>{
       const p=parts.find(x=>x.id===ml.part_id); const k=maintKits.find(x=>x.id===ml.kit_id);
       const kitSize=ml.line_type==="kit"?kitLines.filter(l=>l.kit_id===ml.kit_id).length:0;
@@ -3717,8 +3719,12 @@ function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions })
           : <Sel value={add.kit_id} onChange={e=>setAdd(a=>({...a,kit_id:e.target.value}))}><option value="">Select kit…</option>{maintKits.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</Sel>}
         <input type="number" min="1" step="any" value={add.qty} onChange={e=>setAdd(a=>({...a,qty:e.target.value}))} style={{...inputStyle,fontFamily:"monospace"}} title="Quantity"/>
         <input type="date" value={add.needed_by} onChange={e=>setAdd(a=>({...a,needed_by:e.target.value}))} style={inputStyle} title="Needed by"/>
-        <Btn variant="outline" disabled={!valid||busy} onClick={()=>run(async()=>{await actions.addMaintLine({order_id:order.id,...add});setAdd({line_type:add.line_type,part_id:"",kit_id:"",qty:1,needed_by:""});})}>Add</Btn>
+        <Btn variant="outline" disabled={!valid||busy} onClick={()=>run(async()=>{await actions.addMaintLine({order_id:order.id,...add});
+          const what=add.line_type==="part"?add.part_id:(maintKits.find(k=>k.id===add.kit_id)?.name||"kit");
+          setSaved(`✓ Added ${what} × ${add.qty}. Saved.`);
+          setAdd({line_type:add.line_type,part_id:"",kit_id:"",qty:1,needed_by:""});})}>{busy?"Saving…":"Add line"}</Btn>
       </div>
+      <div style={{fontSize:11,marginTop:8,color:saved?C.greenText:C.textMid,fontWeight:saved?700:400}}>{saved||"Pick a part or kit, enter the quantity, then tap Add line. Each line saves when it's added; there's nothing else to save."}</div>
     </div>
   </div>;
 }
@@ -3899,8 +3905,9 @@ function OrderDetailModal({ packingLines, packingSlipTypes, lps, order, customer
         <Sel label="Order status" value={f.status} onChange={set("status")}><option>Open</option><option>Closed</option><option>Cancelled</option></Sel>
         <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
           <Btn variant="danger" disabled={busy} onClick={()=>{if(window.confirm(`Delete order ${order.id} and all its lines?`))run(async()=>{await actions.deleteOrder(order.id);onClose();});}}>Delete order</Btn>
-          <Btn disabled={!dirty||busy} onClick={()=>run(()=>actions.updateOrder(order.id,{customer_id:f.customer_id||null,quote_number:f.quote_number||null,po_number:f.po_number||null,project_name:f.project_name||null,notes:f.notes||null,status:f.status}))}>{busy?"Saving…":"Save order"}</Btn>
+          <Btn disabled={!dirty||busy} onClick={()=>run(()=>actions.updateOrder(order.id,{customer_id:f.customer_id||null,quote_number:f.quote_number||null,po_number:f.po_number||null,project_name:f.project_name||null,notes:f.notes||null,status:f.status}))}>{busy?"Saving…":dirty?"Save order details":"✓ Details saved"}</Btn>
         </div>
+        <div style={{fontSize:11,color:C.textLight,textAlign:"right"}}>This button saves the fields above. {isMaint?"Purchase order lines":"Vessel lines"} below save as soon as you add or change them.</div>
       </div>
       <OrderPackingPanel order={order} packingLines={packingLines||[]} parts={parts} packingSlipTypes={packingSlipTypes||[]} actions={actions}/>
       <OrderLpPanel order={order} lps={lps||[]} actions={actions} onOpenLp={onOpenLp} packingCount={(packingLines||[]).filter(l=>l.order_id===order.id).length} disabled={(order.status||"Open")!=="Open"}/>
