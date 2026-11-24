@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<rect width="512" height="512" rx="96" fill="#1C2B3A"/>
+<rect x="0" y="96" width="512" height="14" fill="#F5A623"/>
+<rect x="107.6" y="150" width="9.6" height="130" fill="#fff"/><rect x="132.0" y="150" width="14.4" height="130" fill="#fff"/><rect x="161.2" y="150" width="9.6" height="130" fill="#fff"/><rect x="200.0" y="150" width="4.8" height="130" fill="#fff"/><rect x="224.4" y="150" width="4.8" height="130" fill="#fff"/><rect x="253.6" y="150" width="9.6" height="130" fill="#fff"/><rect x="278.0" y="150" width="19.2" height="130" fill="#fff"/><rect x="312.0" y="150" width="9.6" height="130" fill="#fff"/><rect x="346.0" y="150" width="4.8" height="130" fill="#fff"/><rect x="370.4" y="150" width="6.4" height="130" fill="#fff"/><rect x="399.6" y="150" width="4.8" height="130" fill="#fff"/>
+<text x="256" y="395" text-anchor="middle" font-family="Arial Black, Arial, Helvetica, sans-serif" font-weight="900" font-size="120" fill="#F5A623" letter-spacing="6">CT</text>
+</svg>
