@@ -5064,13 +5064,13 @@ function FabricatorApp({ user, onSignOut }) {
   if(openId&&lp&&lp.id===openId){
     const items=lp.items||[]; const done=items.filter(i=>i.checked).length;
     const groups=[]; items.forEach(it=>{ const g=(it.list||"Items"); let x=groups.find(a=>a.g===g); if(!x){x={g,rows:[]};groups.push(x);} x.rows.push(it); });
-    return <div style={wrap}>
+    return <div key={"lp:"+lp.id} style={wrap} translate="no">
       {top}
       <button onClick={()=>{setOpenId(null);setLp(null);loadList();}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:14,marginBottom:10}}>← All shipments</button>
       <h2 style={{margin:"0 0 4px"}}>{lp.id}</h2>
-      <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
+      <div style={{fontSize:14,color:"#445"}}>{`${lp.destination||""}${lp.po_number?` · Customer PO ${lp.po_number}`:""}`}</div>
       <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden",marginTop:12}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
-      <div style={{fontSize:14,margin:"6px 0 10px"}}><b>{done}</b> of <b>{items.length}</b> checked · <b>{lp.status}</b></div>
+      <div style={{fontSize:14,margin:"6px 0 10px",fontWeight:700}}>{`${done} of ${items.length} checked · ${lp.status}`}</div>
       {scanBar}
       {lpAtFabricator(lp.status)&&<button onClick={()=>setLpStatus("Shipped")} disabled={busy==="status"} style={{width:"100%",minHeight:48,marginBottom:14,borderRadius:10,border:"none",background:"#1c2b3a",color:"#fff",fontSize:16,fontWeight:800}}>🚚 Mark Shipped to Customer</button>}
       {lp.status==="Shipped"&&<div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,padding:"10px 12px",borderRadius:10,background:"#eef2f6",fontSize:14}}>🚚 Shipped to the customer<button onClick={()=>setLpStatus("Sent to Fabricator")} disabled={busy==="status"} style={{marginLeft:"auto",padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Undo</button></div>}
@@ -5103,7 +5103,7 @@ function FabricatorApp({ user, onSignOut }) {
     </div>;
   }
 
-  return <div style={wrap}>
+  return <div key="list" style={wrap} translate="no">
     {top}
     <h2 style={{margin:"0 0 10px"}}>Your shipments</h2>
     {scanBar}
@@ -5111,8 +5111,8 @@ function FabricatorApp({ user, onSignOut }) {
     {!list?<div>Loading…</div>:list.length===0?<div style={{color:"#667"}}>No shipments are assigned to your company right now.</div>:
       list.map(l=><button key={l.id} onClick={()=>openShipment(l.id)} disabled={!!opening} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:`2px solid ${opening===l.id?"#1c2b3a":"#c9d6e2"}`,borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit",opacity:opening&&opening!==l.id?.6:1}}>
         <div style={{fontWeight:800,fontSize:16}}>{l.id}{opening===l.id&&<span style={{fontWeight:400,fontSize:13,color:"#667"}}> · Opening…</span>}</div>
-        <div style={{fontSize:13,color:"#445"}}>{l.destination}{l.po_number?` · PO ${l.po_number}`:""}</div>
-        <div style={{fontSize:13,marginTop:4}}><b>{l.status}</b> · <b>{l.checked}</b> of <b>{l.total}</b> checked{l.issues>0?<span style={{color:"#b00020"}}> · ⚠ {l.issues} problem{l.issues>1?"s":""}</span>:null}</div>
+        <div style={{fontSize:13,color:"#445"}}>{`${l.destination||""}${l.po_number?` · PO ${l.po_number}`:""}`}</div>
+        <div style={{fontSize:13,marginTop:4,fontWeight:700}}>{`${l.status} · ${l.checked} of ${l.total} checked`}{l.issues>0?<span style={{color:"#b00020"}}>{` · ⚠ ${l.issues} problem${l.issues>1?"s":""}`}</span>:null}</div>
       </button>)}
     <div style={{fontSize:12,color:"#889",marginTop:16}}>Signed in as {user?.email}</div>
   </div>;
