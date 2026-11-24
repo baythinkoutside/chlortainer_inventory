@@ -4936,6 +4936,7 @@ function FabricatorApp({ user, onSignOut }) {
     const ok=await loadLp(id);
     setOpening("");
     if(ok){ setOpenId(id); window.scrollTo(0,0); }
+    return ok;
   }
   useEffect(()=>{ loadList(); },[]);
   // Coming back to the app (phone unlocked, tab switched): refresh what is showing.
@@ -4967,6 +4968,70 @@ function FabricatorApp({ user, onSignOut }) {
     await loadLp(lp.id);
   }
 
+  // ── Scanning: LP / box label opens the shipment; a part's label checks off its line ──
+  const [scanMsg,setScanMsg]=useState(null);   // {ok, text}
+  const [cam,setCam]=useState(false);
+  const [code,setCode]=useState("");
+  const [sound,setSound]=useState(soundsOn);
+  const scanBusy=useRef(false);
+  const lpRef=useRef(null); lpRef.current=lp;
+  useEffect(()=>{   // phones need a tap before audio can play
+    const unlock=()=>scanAudio();
+    window.addEventListener("pointerdown",unlock); window.addEventListener("keydown",unlock);
+    return ()=>{ window.removeEventListener("pointerdown",unlock); window.removeEventListener("keydown",unlock); };
+  },[]);
+  const say=(ok,text,tone)=>{ setScanMsg({ok,text}); scanTone(tone||(ok?"good":"bad")); if(!ok&&navigator.vibrate) navigator.vibrate([200,80,200]); };
+  async function onScan(raw){
+    const c=String(raw||"").trim(); if(!c||scanBusy.current) return;
+    scanBusy.current=true;
+    try{
+      const cur=openIdRef.current?lpRef.current:null;
+      const items=cur?.items||[];
+      // 1) A part on the open shipment, by its CT- number (item label)
+      let ids=items.some(i=>String(i.partId).toUpperCase()===c.toUpperCase())?[items.find(i=>String(i.partId).toUpperCase()===c.toUpperCase()).partId]:null;
+      // 2) A license plate / box label
+      if(!ids){
+        const {data:r,error}=await _sb.rpc("fab_scan_lp",{p_code:c});
+        if(error) throw error;
+        if(r?.result==="mine"){
+          if(cur&&cur.id===r.id) say(true,`That's this shipment (${r.id}). Now scan the parts.`,"info");
+          else { setCam(false); const ok=await openShipment(r.id); if(ok!==false) say(true,`Opened ${r.id}. Scan each part to check it off.`,"info"); }
+          return;
+        }
+        if(r?.result==="other_fabricator"){ say(false,`${r.id} is assigned to another fabricator. Check with TGO before using it.`); return; }
+        if(r?.result==="not_sent"){ say(false,`${r.id} isn't assigned to a fabricator. Check with TGO.`); return; }
+        // 3) Manufacturer barcode or old / new part number
+        const {data:pid,error:e2}=await _sb.rpc("fab_resolve_code",{p_code:c});
+        if(e2) throw e2;
+        ids=(pid||[]);
+        if(!ids.length){ say(false,`Unknown barcode "${c}".`); return; }
+      }
+      if(!cur){ say(false,"Open a shipment first: scan its license plate or box label, or tap it in the list."); return; }
+      const lines=items.filter(i=>ids.includes(i.partId));
+      if(!lines.length){ say(false,`${ids.join(" / ")} is not on ${cur.id}. Nothing changed.`); return; }
+      const line=lines.find(i=>!i.checked);
+      if(!line){ say(false,`${line?.partId||lines[0].partId} is already checked off on ${cur.id}.`); return; }
+      const {data:ok,error:e3}=await _sb.rpc("fab_set_checked",{p_lp:cur.id,p_key:line.key,p_checked:true});
+      if(e3||!ok){ say(false,"Couldn't save the check-off. Check your connection and scan again."); return; }
+      const left=items.filter(i=>!i.checked&&i.key!==line.key).length;
+      say(true,`✓ ${line.qty} × ${line.description||line.partId} checked off. Count ${line.qty} in the box.${left?` ${left} left.`:" All items checked."}`,left?"good":"done");
+      await loadLp(cur.id);
+    }catch(e){ say(false,`Scan failed: ${e.message||e}`); }
+    finally{ scanBusy.current=false; }
+  }
+  const scanBar=<div style={{background:"#fff",border:"2px solid #F5A623",borderRadius:12,padding:12,marginBottom:14,display:"grid",gap:10}}>
+    <div style={{display:"flex",gap:8}}>
+      <input value={code} onChange={e=>setCode(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"){ onScan(code); setCode(""); } }}
+        placeholder={openId?"Scan a part, or another LP…":"Scan a license plate or box label…"} autoComplete="off" autoCapitalize="characters"
+        style={{flex:1,minWidth:0,minHeight:48,padding:"0 12px",fontSize:16,borderRadius:8,border:"1.5px solid #c9d6e2",fontFamily:"monospace"}}/>
+      <button onClick={()=>setCam(v=>!v)} aria-label="Camera" style={{minWidth:52,minHeight:48,borderRadius:8,border:"1.5px solid #c9d6e2",background:cam?"#1c2b3a":"#fff",color:cam?"#fff":"#1c2b3a",fontSize:20}}>📷</button>
+      <button onClick={()=>{ const v=!sound; setSound(v); try{ localStorage.setItem(SOUND_PREF,v?"1":"0"); }catch(_){} if(v){ scanAudio(); setTimeout(()=>scanTone("good"),30); } }}
+        aria-label={sound?"Sounds on":"Sounds off"} style={{minWidth:52,minHeight:48,borderRadius:8,border:"1.5px solid #c9d6e2",background:"#fff",fontSize:20}}>{sound?"🔊":"🔇"}</button>
+    </div>
+    {cam&&<CameraScanner onScan={onScan} onClose={()=>setCam(false)} hint={openId?"Hold on a part label. Move away and back to scan again.":"Point at the license plate or box label."}/>}
+    {scanMsg&&<div style={{padding:"10px 12px",borderRadius:8,fontSize:15,fontWeight:700,background:scanMsg.ok?"#f1faf4":"#fff0f2",color:scanMsg.ok?"#1a6b42":"#b00020",border:`1.5px solid ${scanMsg.ok?"#7ecfa4":"#f5a0ae"}`}}>{scanMsg.text}</div>}
+  </div>;
+
   const top=<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
     <div style={{fontWeight:900,fontSize:18}}>ChlorTainer <span style={{fontSize:11,color:"#a35d00",letterSpacing:1.5}}>FABRICATOR</span></div>
     <button onClick={onSignOut} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Sign out</button>
@@ -4982,6 +5047,7 @@ function FabricatorApp({ user, onSignOut }) {
       <div style={{fontSize:14,color:"#445"}}>{lp.destination}{lp.po_number?` · Customer PO ${lp.po_number}`:""}</div>
       <div style={{background:"#eef2f6",borderRadius:8,height:14,overflow:"hidden",marginTop:12}}><div style={{width:`${items.length?Math.round(done/items.length*100):0}%`,background:"#2e9d5b",height:"100%"}}/></div>
       <div style={{fontSize:14,margin:"6px 0 10px"}}><b>{done}</b> of <b>{items.length}</b> checked · <b>{lp.status}</b></div>
+      {scanBar}
       {lpAtFabricator(lp.status)&&<button onClick={()=>setLpStatus("Shipped")} disabled={busy==="status"} style={{width:"100%",minHeight:48,marginBottom:14,borderRadius:10,border:"none",background:"#1c2b3a",color:"#fff",fontSize:16,fontWeight:800}}>🚚 Mark Shipped to Customer</button>}
       {lp.status==="Shipped"&&<div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,padding:"10px 12px",borderRadius:10,background:"#eef2f6",fontSize:14}}>🚚 Shipped to the customer<button onClick={()=>setLpStatus("Sent to Fabricator")} disabled={busy==="status"} style={{marginLeft:"auto",padding:"6px 12px",borderRadius:8,border:"1px solid #9DC3E6",background:"#fff",fontSize:13}}>Undo</button></div>}
       {lp.status==="Delivered"&&<div style={{marginBottom:14,padding:"10px 12px",borderRadius:10,background:"#f1faf4",fontSize:14,color:"#2e7d4f"}}>✓ Delivered to the customer</div>}
@@ -5016,6 +5082,7 @@ function FabricatorApp({ user, onSignOut }) {
   return <div style={wrap}>
     {top}
     <h2 style={{margin:"0 0 10px"}}>Your shipments</h2>
+    {scanBar}
     {err&&<p style={{color:"#b00020"}}>{err}</p>}
     {!list?<div>Loading…</div>:list.length===0?<div style={{color:"#667"}}>No shipments are assigned to your company right now.</div>:
       list.map(l=><button key={l.id} onClick={()=>openShipment(l.id)} disabled={!!opening} style={{display:"block",width:"100%",textAlign:"left",marginBottom:10,padding:14,border:`2px solid ${opening===l.id?"#1c2b3a":"#c9d6e2"}`,borderRadius:10,background:"#fff",cursor:"pointer",font:"inherit",color:"inherit",opacity:opening&&opening!==l.id?.6:1}}>
