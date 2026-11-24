@@ -19,6 +19,11 @@ export const LABEL_SIZES = {
     // Avery 5163 geometry
     perPage: 10, cols: 2, top: 0.5, left: 0.15625, colGap: 0.1875,
   },
+  "avery5160": {
+    name: 'Letter sheet, 2.625" × 1", 30 per sheet — Avery 5160 / 8160: part #, description, barcode (no photo / QR)',
+    w: 2.625, h: 1, mode: "sheet", full: false,
+    perPage: 30, cols: 3, top: 0.5, left: 0.1875, colGap: 0.125,
+  },
   // ── Item (SKU) labels: stuck on the part or its bag ──
   "item1x05": {
     name: '1" × 0.5" thermal roll — part #, description, barcode (TGO item label)',
@@ -92,16 +97,13 @@ function labelHtml(p, size, opts) {
   </div>`;
 }
 
-function buildDoc(list, size, opts, autoPrint) {
+// Wraps finished label HTML in a printable page: one label per page on a roll,
+// or placed at fixed positions on Letter sheets (Avery). Shared by bin, item and LP labels.
+function pageDoc(labels, size, skipN, title, labelCss, autoPrint) {
   const W = size.w, H = size.h;
-  // Scale typography with label width (3" label = 1.0)
-  const k = size.full ? W / 3 : 1;
-  const f = Math.min(k, 1.1); // font scale, capped so 4" labels don't overflow
-  const labels = list.map((p) => labelHtml(p, size, opts));
-
   let body, pageCss;
   if (size.mode === "sheet") {
-    const skip = Math.max(0, Math.min(size.perPage - 1, +opts.skip || 0));
+    const skip = Math.max(0, Math.min(size.perPage - 1, +skipN || 0));
     const cells = [...Array(skip).fill(null), ...labels];
     const pages = [];
     for (let i = 0; i < cells.length; i += size.perPage) pages.push(cells.slice(i, i + size.perPage));
@@ -123,13 +125,30 @@ function buildDoc(list, size, opts, autoPrint) {
       @media screen{.pg{outline:1px dashed #bbb;margin:0 auto 12px;background:#fff}}`;
   }
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=816"><title>${kindOf(size) === "item" ? "Item" : "Bin"} Labels (${list.length})</title>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=816"><title>${esc(title)}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{font-family:Arial,Helvetica,sans-serif;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 @media screen{body{background:#eee;padding:16px}}
 ${pageCss}
 .lbl{width:${W}in;height:${H}in;overflow:hidden;display:flex;flex-direction:column}
+${labelCss}
+</style></head><body>
+${body}
+<script>
+${autoPrint ? 'window.addEventListener("load",function(){setTimeout(function(){window.print();},300);});' : ""}
+<\/script>
+</body></html>`;
+}
+
+function buildDoc(list, size, opts, autoPrint) {
+  const W = size.w;
+  // Scale typography with label width (3" label = 1.0)
+  const k = size.full ? W / 3 : 1;
+  const f = Math.min(k, 1.1); // font scale, capped so 4" labels don't overflow
+  const labels = list.map((p) => labelHtml(p, size, opts));
+  const title = `${kindOf(size) === "item" ? "Item" : "Bin"} Labels (${list.length})`;
+  const css = `
 .lbl.empty{visibility:hidden}
 .full{padding:${0.09 * k}in ${0.1 * k}in}
 .full .top{display:flex;gap:${0.08 * k}in;height:52%;min-height:0}
@@ -162,13 +181,8 @@ ${pageCss}
 .item.tiny .desc1{text-align:center}
 .item.mini{padding:.02in .03in .015in;gap:0}
 .item.mini .pid{font-size:6.5pt;letter-spacing:0}
-.item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}
-</style></head><body>
-${body}
-<script>
-${autoPrint ? 'window.addEventListener("load",function(){setTimeout(function(){window.print();},300);});' : ""}
-<\/script>
-</body></html>`;
+.item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}`;
+  return pageDoc(labels, size, opts.skip, title, css, autoPrint);
 }
 
 // Item labels get a blank margin each side so scanners find the start and end.
@@ -326,4 +340,84 @@ export default function BinLabelsTab({ parts, ui }) {
       </div>
     </div>
   );
+}
+
+// ─── License plate box labels ────────────────────────────────────────────────
+// Stuck on the outside of each box / container that goes with a license plate.
+// One label per packing-list box (in packing-list order), so "Box 2 of 5" matches the LP print.
+export const LP_LABEL_SIZES = {
+  "avery5164": {
+    name: 'Letter sheet, 4" × 3⅓", 6 per sheet — Avery 5164 / 8164 (laser)',
+    w: 4, h: 3.3333, mode: "sheet",
+    perPage: 6, cols: 2, top: 0.5, left: 0.15625, colGap: 0.1875,
+  },
+  "lp4x6": {
+    name: '4" × 6" thermal roll (shipping label printer)',
+    w: 4, h: 6, mode: "roll",
+  },
+};
+
+// Boxes of the warehouse lines, grouped by packing list (Main / Loose / Spare…) then box,
+// in the same order as the license plate print. Direct-ship lines are not in the container.
+export function lpBoxes(lp, items, packingSlipTypes = []) {
+  const listOf = (it) => it.list || lp.packing_slip_type || "Items";
+  const order = packingSlipTypes.map((t) => t.name);
+  const rank = (n) => { const i = order.indexOf(n); return i < 0 ? 999 : i; };
+  const wh = (items || []).filter((it) => it.source !== "direct");
+  const lists = [...new Set(wh.map(listOf))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  const out = [];
+  lists.forEach((name) => {
+    const rows = wh.filter((it) => listOf(it) === name);
+    const boxOf = (it) => (it.box && it.box !== name ? it.box : "");
+    [...new Set(rows.map(boxOf))].forEach((bx) => {
+      const r = rows.filter((it) => boxOf(it) === bx);
+      out.push({ list: name, box: bx, lines: r.length, pcs: r.reduce((s, it) => s + (+it.qty || 0), 0) });
+    });
+  });
+  return out.length ? out : [{ list: lp.packing_slip_type || "", box: "", lines: 0, pcs: 0 }];
+}
+
+function lpLabelHtml(lp, customer, b, i, n) {
+  const kv = (k, v) => (v ? `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>` : "");
+  const shipTo = lp.destination && lp.destination !== customer?.name ? lp.destination : "";
+  const addr = customer ? [customer.address_line1, customer.address_line2,
+    [customer.city, customer.state].filter(Boolean).join(", ") + (customer.zip ? " " + customer.zip : "")]
+    .filter((x) => x && x.trim()).map(esc).join("<br>") : "";
+  const boxName = b.box ? b.box.replace(new RegExp("^" + b.list.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*", "i"), "") || b.box : "";
+  return `<div class="lbl lpl">
+    <div class="hd"><span class="co">ChlorTainer</span><span class="sub">License Plate</span><span class="of">${i} of ${n}</span></div>
+    <div class="lpid">${esc(lp.id)}</div>
+    <svg class="c128 nb" data-code="${esc(lp.id)}"></svg>
+    <div class="grp">${esc(b.list || "Shipment")}${boxName ? ` · <span class="bx">📦 ${esc(boxName)}</span>` : ""}${b.lines ? `<span class="cnt">${b.lines} line${b.lines !== 1 ? "s" : ""} · ${b.pcs} pc${b.pcs !== 1 ? "s" : ""}</span>` : ""}</div>
+    <div class="kvs">${kv("Customer", customer?.name)}${kv("Ship to", shipTo)}${kv("Order", lp.order_id)}${kv("Quote", lp.quote_number)}${kv("Customer PO", lp.po_number)}</div>
+    ${addr ? `<div class="addr">${addr}</div>` : ""}
+  </div>`;
+}
+
+export async function printLpLabels({ lp, items, customer, packingSlipTypes, sizeKey, copies = 1, skip = 0 }, autoPrint = true) {
+  const size = LP_LABEL_SIZES[sizeKey] || LP_LABEL_SIZES.avery5164;
+  const w = window.open("", "_blank");            // open inside the click so pop-up blockers allow it
+  if (!w) { alert("Allow pop-ups to print labels."); return; }
+  w.document.write("<p style='font:14px Arial;padding:24px'>Preparing labels…</p>");
+  const boxes = lpBoxes(lp, items, packingSlipTypes);
+  const c = Math.max(1, Math.min(20, +copies || 1));
+  const labels = boxes.flatMap((b, i) => Array(c).fill(lpLabelHtml(lp, customer, b, i + 1, boxes.length)));
+  const tall = size.h >= 5; // 4" × 6" gets bigger type
+  const css = `
+.lpl{padding:.14in .18in;gap:${tall ? ".08in" : ".04in"}}
+.lpl .hd{display:flex;align-items:baseline;gap:.08in;border-bottom:3px solid #000;padding-bottom:.03in}
+.lpl .co{font-weight:900;font-size:${tall ? 16 : 12}pt}.lpl .sub{font-size:${tall ? 9 : 7.5}pt;text-transform:uppercase;letter-spacing:1px}
+.lpl .of{margin-left:auto;font-weight:900;font-size:${tall ? 16 : 12}pt}
+.lpl .lpid{font-family:"Courier New",monospace;font-weight:900;font-size:${tall ? 30 : 22}pt;text-align:center;line-height:1.05}
+.lpl .c128{width:100%;height:${tall ? "1.3in" : ".62in"};display:block;flex-shrink:0}
+.lpl .grp{font-weight:900;font-size:${tall ? 15 : 11}pt;text-transform:uppercase;border:2px solid #000;padding:.03in .06in;display:flex;flex-wrap:wrap;gap:.06in;align-items:baseline}
+.lpl .bx{text-transform:none}.lpl .cnt{margin-left:auto;font-size:${tall ? 9 : 7.5}pt;font-weight:700;text-transform:none}
+.lpl .kvs{display:grid;grid-template-columns:1fr 1fr;gap:.02in .12in}
+.lpl .kv span{display:block;font-size:${tall ? 7.5 : 6}pt;text-transform:uppercase;letter-spacing:.5px}
+.lpl .kv b{font-size:${tall ? 11 : 8.5}pt;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lpl .addr{font-size:${tall ? 10 : 7.5}pt;line-height:1.2;overflow:hidden}`;
+  const html = await drawCodes(pageDoc(labels, size, skip, `${lp.id} — Box Labels (${labels.length})`, css, autoPrint));
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }

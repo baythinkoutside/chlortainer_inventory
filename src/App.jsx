@@ -1,7 +1,7 @@
 // ChlorTainer Inventory System v2.1
 import { useState, useEffect, useRef, useMemo, useId } from "react";
 import { forecast, FIRM_STATUSES } from "./replenishment.js";
-import BinLabelsTab from "./BinLabels.jsx";
+import BinLabelsTab, { LP_LABEL_SIZES, lpBoxes, printLpLabels } from "./BinLabels.jsx";
 import { parseSlip, guessListType, matchPart } from "./slipParser.js";
 
 // ─── Supabase via CDN ─────────────────────────────────────────────────────────
@@ -2713,6 +2713,10 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   const [quoteNumber,setQuoteNumber]=useState(lp.quote_number||"");
   const [poNumber,setPoNumber]=useState(lp.po_number||"");
   const customer=customers?.find(c=>c.id===(customerId||lp.customer_id));
+  const [lblOpen,setLblOpen]=useState(false);
+  const [lblKey,setLblKey]=useState(()=>{ try{ const k=localStorage.getItem("ct_lp_label_stock"); return LP_LABEL_SIZES[k]?k:"avery5164"; }catch(_){ return "avery5164"; } });
+  const [lblCopies,setLblCopies]=useState(1);
+  const [lblSkip,setLblSkip]=useState(0);
   const [items,setItems]=useState(lp.items||[]);
   const itemsRef=useRef(items); itemsRef.current=items;
   const itemsTimer=useRef(null);
@@ -2866,6 +2870,30 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         {lp.order_id&&onOpenOrder&&<button onClick={async()=>{ if(!(await flushItems())) return; onClose(); onOpenOrder(lp.order_id); }}
           style={{border:"1px solid #9DC3E6",background:"#EBF2FA",color:C.navy,borderRadius:6,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📑 Order {lp.order_id} ›</button>}
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>printLicensePlate({lp:{...lp,type,status,destination,quote_number:quoteNumber,po_number:poNumber,packing_slip_type:packingSlipType},items,parts,customer,packingSlipTypes,fabricator:(fabricators||[]).find(f=>f.id===(fabricatorId||lp.fabricator_id))})}>🖨️ Print License Plate</Btn>
+        <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>setLblOpen(o=>!o)}>🏷️ Box Labels {lblOpen?"▲":"▼"}</Btn>
+        {lblOpen&&(()=>{
+          const lpNow={...lp,type,status,destination,quote_number:quoteNumber,po_number:poNumber,packing_slip_type:packingSlipType};
+          const boxes=lpBoxes(lpNow,items,packingSlipTypes);
+          const sz=LP_LABEL_SIZES[lblKey];
+          const total=boxes.length*Math.max(1,Math.min(20,+lblCopies||1));
+          const go=auto=>{ try{ localStorage.setItem("ct_lp_label_stock",lblKey); }catch(_){}
+            printLpLabels({lp:lpNow,items,customer,packingSlipTypes,sizeKey:lblKey,copies:lblCopies,skip:lblSkip},auto); };
+          return <div style={{width:"100%",maxWidth:460,background:C.white,border:`1px solid ${C.border}`,borderRadius:8,padding:12,display:"grid",gap:10}}>
+            <div style={{fontSize:12,color:C.textMid}}>One label per box on this license plate ({boxes.length} box{boxes.length!==1?"es":""}), for the outside of each box or container.</div>
+            <Sel label="Label stock" value={lblKey} onChange={e=>setLblKey(e.target.value)}>
+              {Object.entries(LP_LABEL_SIZES).map(([k,v])=><option key={k} value={k}>{v.name}</option>)}
+            </Sel>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div style={{width:110}}><Input label="Copies each" type="number" min="1" max="20" value={lblCopies} onChange={e=>setLblCopies(e.target.value)}/></div>
+              {sz.mode==="sheet"&&<div style={{width:150}}><Input label="Skip used labels" type="number" min="0" max={sz.perPage-1} value={lblSkip} onChange={e=>setLblSkip(e.target.value)}/></div>}
+            </div>
+            <div style={{fontSize:11,color:C.textLight}}>{sz.mode==="sheet"?<>Print on <b>Letter</b>, scale <b>100%</b>, margins <b>None</b>, headers &amp; footers <b>off</b>.</>:<>Paper size <b>4" × 6"</b>, scale <b>100%</b>, margins <b>None</b>.</>}</div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="navy" onClick={()=>go(true)}>🖨️ Print {total} Label{total!==1?"s":""}</Btn>
+              <Btn variant="outline" onClick={()=>go(false)}>👁 Preview</Btn>
+            </div>
+          </div>;
+        })()}
       </div>
 
       {/* Status actions */}
