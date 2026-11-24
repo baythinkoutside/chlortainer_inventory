@@ -1335,8 +1335,56 @@ function lpPickProgress(items){
 const binSortKey=l=>{ const s=(l||"").trim().toUpperCase(); return s||"￿"; };   // no location → end of list
 const isTouch=()=>typeof window!=="undefined"&&("ontouchstart" in window);
 
+// ─── Scan sounds ─────────────────────────────────────────────────────────────
+// Made with the browser's Web Audio (no sound files):
+//   good  = two quick high chirps        (part picked)
+//   done  = rising three-note chime      (that line is now fully picked / whole LP done)
+//   bad   = low double buzz              (wrong part, unknown barcode, already picked, error)
+//   info  = one soft tick                (LP label scanned, undo)
+// Phones only allow sound after a tap on the page, so the first tap on the picking screen unlocks it.
+// iPhones in silent mode (ring/silent switch) mute these tones.
+const SOUND_PREF="ct_scan_sounds";
+let _actx=null;
+function scanAudio(){
+  try{
+    if(!_actx){ const A=window.AudioContext||window.webkitAudioContext; if(!A) return null; _actx=new A(); }
+    if(_actx.state==="suspended") _actx.resume();
+    return _actx;
+  }catch(_){ return null; }
+}
+const soundsOn=()=>{ try{ return localStorage.getItem(SOUND_PREF)!=="0"; }catch(_){ return true; } };
+function scanTone(kind){
+  if(!soundsOn()) return;
+  const ctx=scanAudio(); if(!ctx) return;
+  const notes={
+    good:[[1320,0,.07],[1760,.09,.08]],
+    done:[[1047,0,.09],[1319,.1,.09],[1568,.2,.18]],
+    bad:[[196,0,.18],[196,.24,.24]],
+    info:[[880,0,.05]],
+  }[kind]||[];
+  const t0=ctx.currentTime+.01;
+  notes.forEach(([f,at,dur])=>{
+    const o=ctx.createOscillator(), g=ctx.createGain();
+    o.type=kind==="bad"?"square":"sine";
+    o.frequency.value=f;
+    const vol=kind==="bad"?.18:.35;
+    g.gain.setValueAtTime(0,t0+at);
+    g.gain.linearRampToValueAtTime(vol,t0+at+.01);
+    g.gain.setValueAtTime(vol,t0+at+dur-.02);
+    g.gain.linearRampToValueAtTime(0,t0+at+dur);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t0+at); o.stop(t0+at+dur+.02);
+  });
+}
+
 function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   const lp=lps.find(l=>l.id===lpId);
+  const [sound,setSound]=useState(soundsOn);
+  useEffect(()=>{   // phones need a tap before audio can play: unlock on the first touch / key
+    const unlock=()=>scanAudio();
+    window.addEventListener("pointerdown",unlock); window.addEventListener("keydown",unlock);
+    return ()=>{ window.removeEventListener("pointerdown",unlock); window.removeEventListener("keydown",unlock); };
+  },[]);
   const [items,setItems]=useState(lp?.items||[]);
   useEffect(()=>{ if(lp) setItems(lp.items||[]); },[lp]);
   const [code,setCode]=useState("");
@@ -1367,7 +1415,11 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
   const shown=show==="remaining"?remaining:pickRows;
   const canPick=lpIsPrep(lp.status)&&(lp.type||"Outbound")==="Outbound";
 
-  function feedback(ok,text){ setMsg({ok,text}); if(!ok&&navigator.vibrate) navigator.vibrate([60,60,60]); }
+  function feedback(ok,text,tone){
+    setMsg({ok,text});
+    scanTone(tone||(ok?"good":"bad"));
+    if(!ok&&navigator.vibrate) navigator.vibrate([200,80,200]);
+  }
   function refocus(){ if(!isTouch()) inputRef.current?.focus(); }   // keeps a USB/Bluetooth scanner typing into the box
 
   async function doPick(partId,n,lineIdx=null){
@@ -1378,7 +1430,8 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
       setItems(next);
       const p=parts.find(x=>x.id===partId);
       const ch=next.find((x,k)=>(x.picked||0)!==(before[k]?.picked||0));
-      feedback(true,`${p?.description||partId}: ${ch?.picked??"?"} of ${ch?.qty??"?"} picked`);
+      const allDone=lpPickProgress(next); const lineDone=ch&&(ch.picked||0)>=ch.qty;
+      feedback(true,`${p?.description||partId}: ${ch?.picked??"?"} of ${ch?.qty??"?"} picked${allDone.qty&&allDone.picked>=allDone.qty?" · ✅ License plate fully picked":""}`,lineDone?"done":"good");
     }catch(e){ feedback(false,e.message||String(e)); }
     busyRef.current=false; setBusy(false); refocus();
   }
@@ -1387,13 +1440,13 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
     try{
       const next=await actions.unpickLpItem(lp.id,itemsRef.current,partId,1,lineIdx);
       setItems(next);
-      feedback(true,`Returned 1 × ${partId} to inventory.`);
+      feedback(true,`Returned 1 × ${partId} to inventory.`,"info");
     }catch(e){ feedback(false,e.message||String(e)); }
     busyRef.current=false; setBusy(false); refocus();
   }
   function onCode(raw){
     const c=(raw||"").trim(); if(!c) return;
-    if(c.toUpperCase()===lp.id.toUpperCase()){ feedback(true,"That is this license plate. Now scan a part."); return; }
+    if(c.toUpperCase()===lp.id.toUpperCase()){ feedback(true,"That is this license plate. Now scan a part.","info"); return; }
     const r=resolvePartOnLp(parts,mfgBarcodes,itemsRef.current,c);
     if(r&&r.ambiguous){ feedback(false,`"${c}" matches ${r.ambiguous.map(p=>p.id).join(" and ")}. Scan the CT- label instead.`); return; }
     if(!r){ feedback(false,`Unknown barcode "${c}".`); return; }
@@ -1415,6 +1468,9 @@ function PickScreen({ lpId, lps, parts, mfgBarcodes, actions, onClose }) {
             <div style={{fontFamily:"monospace",fontSize:18,fontWeight:800}}>{lp.id}</div>
             <div style={{fontSize:12,color:"#C9D3DE",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{lp.destination}{lp.po_number?` · PO ${lp.po_number}`:""}</div>
           </div>
+          <button onClick={()=>{ const v=!sound; setSound(v); try{ localStorage.setItem(SOUND_PREF,v?"1":"0"); }catch(_){} if(v){ scanAudio(); setTimeout(()=>scanTone("good"),30); } }}
+            aria-label={sound?"Scan sounds on":"Scan sounds off"} title={sound?"Scan sounds on (tap to mute)":"Scan sounds off (tap to turn on)"}
+            style={bigBtn({background:"transparent",color:"#fff",border:"1.5px solid rgba(255,255,255,.35)",fontSize:20,minWidth:48})}>{sound?"🔊":"🔇"}</button>
           <div style={{textAlign:"right"}}>
             <div style={{fontFamily:"monospace",fontSize:22,fontWeight:800,color:C.amber}}>{totalPicked}/{totalQty}</div>
             <div style={{fontSize:10,color:"#C9D3DE"}}>picked</div>
