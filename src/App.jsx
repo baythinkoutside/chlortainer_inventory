@@ -4937,7 +4937,7 @@ function FabricatorApp({ user, onSignOut }) {
   const [err,setErr]=useState("");
   const [busy,setBusy]=useState("");
   const [flagFor,setFlagFor]=useState(null); // line being flagged
-  const wrap={maxWidth:640,margin:"0 auto",padding:16,fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
+  const wrap={maxWidth:640,margin:"0 auto",padding:16,boxSizing:"border-box",width:"100%",overflowX:"hidden",fontFamily:"system-ui,-apple-system,Segoe UI,sans-serif",color:"#1c2b3a"};
 
   async function loadList(keepMsg=false){
     const {data,error}=await _sb.rpc("fab_list_lps");
@@ -5043,17 +5043,17 @@ function FabricatorApp({ user, onSignOut }) {
     }catch(e){ say(false,`Scan failed: ${e.message||e}`); }
     finally{ scanBusy.current=false; }
   }
-  const scanBar=<div style={{background:"#fff",border:"2px solid #F5A623",borderRadius:12,padding:12,marginBottom:14,display:"grid",gap:10}}>
-    <div style={{display:"flex",gap:8}}>
-      <input value={code} onChange={e=>setCode(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"){ onScan(code); setCode(""); } }}
-        placeholder={openId?"Scan a part, or another LP…":"Scan a license plate or box label…"} autoComplete="off" autoCapitalize="characters"
-        style={{flex:1,minWidth:0,minHeight:48,padding:"0 12px",fontSize:16,borderRadius:8,border:"1.5px solid #c9d6e2",fontFamily:"monospace"}}/>
-      <button onClick={()=>setCam(v=>!v)} aria-label="Camera" style={{minWidth:52,minHeight:48,borderRadius:8,border:"1.5px solid #c9d6e2",background:cam?"#1c2b3a":"#fff",color:cam?"#fff":"#1c2b3a",fontSize:20}}>📷</button>
+  const scanBar=<div style={{background:"#fff",border:"2px solid #F5A623",borderRadius:12,padding:10,marginBottom:14,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:8,boxSizing:"border-box",width:"100%",maxWidth:"100%"}}>
+    <input value={code} onChange={e=>setCode(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"){ onScan(code); setCode(""); } }}
+      placeholder={openId?"Scan or type a part…":"Scan or type an LP…"} autoComplete="off" autoCapitalize="characters" enterKeyHint="go"
+      style={{width:"100%",boxSizing:"border-box",minHeight:48,padding:"0 12px",fontSize:16,borderRadius:8,border:"1.5px solid #c9d6e2",fontFamily:"monospace"}}/>
+    <div style={{display:"flex",gap:8,minWidth:0}}>
+      <button onClick={()=>setCam(v=>!v)} style={{flex:1,minWidth:0,minHeight:48,borderRadius:8,border:"1.5px solid #1c2b3a",background:cam?"#1c2b3a":"#fff",color:cam?"#fff":"#1c2b3a",fontSize:16,fontWeight:700}}>{cam?"✕ Close camera":"📷 Scan with camera"}</button>
       <button onClick={()=>{ const v=!sound; setSound(v); try{ localStorage.setItem(SOUND_PREF,v?"1":"0"); }catch(_){} if(v){ scanAudio(); setTimeout(()=>scanTone("good"),30); } }}
-        aria-label={sound?"Sounds on":"Sounds off"} style={{minWidth:52,minHeight:48,borderRadius:8,border:"1.5px solid #c9d6e2",background:"#fff",fontSize:20}}>{sound?"🔊":"🔇"}</button>
+        aria-label={sound?"Sounds on":"Sounds off"} title={sound?"Sounds on (tap to mute)":"Sounds off"} style={{flex:"0 0 52px",minHeight:48,borderRadius:8,border:"1.5px solid #c9d6e2",background:"#fff",fontSize:20}}>{sound?"🔊":"🔇"}</button>
     </div>
     {cam&&<CameraScanner onScan={onScan} onClose={()=>setCam(false)} hint={openId?"Hold on a part label. Move away and back to scan again.":"Point at the license plate or box label."}/>}
-    {scanMsg&&<div style={{padding:"10px 12px",borderRadius:8,fontSize:15,fontWeight:700,background:scanMsg.ok?"#f1faf4":"#fff0f2",color:scanMsg.ok?"#1a6b42":"#b00020",border:`1.5px solid ${scanMsg.ok?"#7ecfa4":"#f5a0ae"}`}}>{scanMsg.text}</div>}
+    {scanMsg&&<div style={{padding:"10px 12px",borderRadius:8,fontSize:15,fontWeight:700,boxSizing:"border-box",overflowWrap:"anywhere",background:scanMsg.ok?"#f1faf4":"#fff0f2",color:scanMsg.ok?"#1a6b42":"#b00020",border:`1.5px solid ${scanMsg.ok?"#7ecfa4":"#f5a0ae"}`}}>{scanMsg.text}</div>}
   </div>;
 
   const top=<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
