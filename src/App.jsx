@@ -4913,7 +4913,7 @@ class ScreenErrorBoundary extends Component {
   static getDerivedStateFromError(err){ return {err}; }
   componentDidCatch(err,info){
     try{ _sb?.rpc("log_client_error",{p_where:this.props.where||"app",p_msg:String(err?.message||err),
-      p_stack:`${err?.stack||""}\n--- component ---${info?.componentStack||""}\n--- ua --- ${navigator.userAgent}`}); }catch(_){ }
+      p_stack:`${err?.stack||""}\n--- component ---${info?.componentStack||""}\n--- ua --- ${navigator.userAgent}`}).then(()=>{},()=>{}); }catch(_){ }   // .then() sends the request
   }
   render(){
     if(!this.state.err) return this.props.children;
