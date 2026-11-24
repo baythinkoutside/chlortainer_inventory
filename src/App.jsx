@@ -345,8 +345,13 @@ function useData() {
       sb.from("purchase_order_lines").select("*").order("created_at"),
       sb.from("fabricators").select("*").order("name"),
     ]);
-    const stitched=(rawParts||[]).map(p=>({...p,minStock:p.min_stock,
-      suppliers:(links||[]).filter(l=>l.part_id===p.id).map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost),shipsDirect:!!l.ships_direct}))}));
+    const stitched=(rawParts||[]).map(p=>{
+      const ls=(links||[]).filter(l=>l.part_id===p.id);
+      // Ships direct = every supplier link ships direct (never held in TGO stock, never picked here).
+      const directFrom=ls.length>0&&ls.every(l=>l.ships_direct)?((sups||[]).find(x=>x.id===ls[0].supplier_id)?.name||ls[0].supplier_id):null;
+      return {...p,minStock:p.min_stock,directFrom,
+        suppliers:ls.map(l=>({supplierId:l.supplier_id,mfgPartNo:l.mfg_part_no,leadDays:l.lead_days,unitCost:parseFloat(l.unit_cost),shipsDirect:!!l.ships_direct}))};
+    });
     setSuppliers(sups||[]);
     setParts(stitched);
     setLps((plates||[]).map(lp=>({...lp,createdAt:lp.created_at,items:lp.items||[]})));
@@ -1358,6 +1363,16 @@ function resolvePartOnLp(parts, mfgBarcodes, items, code){
   return mb?mb.part_id:null;
 }
 const isWarehouseLine=it=>it.source!=="direct"&&!it.no_stock;
+// A new LP line for a part: direct-ship parts come from the supplier, not the warehouse, so they're never picked.
+function newLpLine(part,partId,qty,extra={}){
+  const base={partId,qty:+qty||1,picked:0,box:"",...extra};
+  return part?.directFrom?{...base,source:"direct",supplier:part.directFrom,direct_status:"To order"}:{...base,source:"warehouse"};
+}
+// Badge for a direct-ship part wherever parts are listed on orders and LPs.
+function DirectShipNote({ part, style }){
+  if(!part?.directFrom) return null;
+  return <span style={{display:"inline-block",fontSize:11,fontWeight:700,color:"#8A5A00",background:"#FEF3DC",border:"1px solid #F5C66B",borderRadius:4,padding:"1px 6px",...style}}>🚚 Ships direct from {part.directFrom} · not picked from the warehouse</span>;
+}
 function lpPickProgress(items){
   const w=(items||[]).filter(isWarehouseLine);
   return {picked:w.reduce((s,i)=>s+Math.min(i.picked||0,i.qty),0), qty:w.reduce((s,i)=>s+i.qty,0), direct:(items||[]).filter(i=>i.source==="direct"&&!i.checked).length};
@@ -2605,7 +2620,7 @@ function CreateLpModal({ parts, customers, packingSlipTypes, actions, onClose })
   const [newTypeInput,setNewTypeInput]=useState("");
   const [addingType,setAddingType]=useState(false);
 
-  function addItem(){if(!pickPart||pickQty<1||items.find(i=>i.partId===pickPart))return;setItems(p=>[...p,{partId:pickPart,qty:+pickQty}]);setPickPart("");setPickQty(1);}
+  function addItem(){if(!pickPart||pickQty<1||items.find(i=>i.partId===pickPart))return;setItems(p=>[...p,newLpLine(parts.find(x=>x.id===pickPart),pickPart,pickQty)]);setPickPart("");setPickQty(1);}
   async function create(){if(!form.destination||items.length===0)return;setSaving(true);await actions.createLP(form,items);setSaving(false);onClose();}
   async function addCustomType(){if(!newTypeInput.trim())return;await actions.addPackingSlipType(newTypeInput.trim());setForm(f=>({...f,packing_slip_type:newTypeInput.trim()}));setNewTypeInput("");setAddingType(false);}
   const available=parts.filter(p=>isActive(p)&&!items.find(i=>i.partId===p.id));
@@ -2985,7 +3000,7 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
   function addItem(){
     const cur=itemsRef.current;
     if(!addPartId||cur.find(i=>i.partId===addPartId))return;
-    queueItemsSave([...cur,{partId:addPartId,qty:+addQty||1}]);
+    queueItemsSave([...cur,newLpLine(parts.find(x=>x.id===addPartId),addPartId,addQty)]);
     setAddPartId(""); setAddQty(1);
   }
   function removeItem(idx){
@@ -3732,6 +3747,9 @@ function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions })
             {ml.line_type==="kit"
               ? <span style={{fontWeight:800,color:C.navy,fontSize:13}}>{k?.name||ml.kit_id} <span style={{fontWeight:500,color:C.textLight,fontSize:11}}>({kitSize} part line(s))</span></span>
               : <span><span style={{fontFamily:"monospace",fontSize:12,color:C.amber,fontWeight:700}}>{ml.part_id}</span> <span style={{fontSize:12,color:C.textMid}}>{p?.description}</span></span>}
+            {ml.line_type==="part"&&<DirectShipNote part={p}/>}
+            {ml.line_type==="kit"&&(()=>{ const d=kitLines.filter(l=>l.kit_id===ml.kit_id).map(l=>parts.find(x=>x.id===l.part_id)).filter(x=>x?.directFrom);
+              return d.length?<span style={{fontSize:11,fontWeight:700,color:"#8A5A00"}}>🚚 {d.map(x=>x.id).join(", ")} ship{d.length===1?"s":""} direct · not picked</span>:null; })()}
           </div>
           <button disabled={busy} onClick={()=>{if(window.confirm("Remove this line?"))run(()=>actions.deleteMaintLine(ml));}} style={{width:26,height:26,borderRadius:4,border:`1px solid ${C.redBorder}`,background:C.white,cursor:"pointer",color:C.red,fontSize:12}}>✕</button>
         </div>
@@ -3769,6 +3787,7 @@ function MaintenanceLines({ order, lines, parts, maintKits, kitLines, actions })
           setSaved(`✓ Added ${what} × ${add.qty}. Saved.`);
           setAdd({line_type:add.line_type,part_id:"",kit_id:"",qty:1,needed_by:""});})}>{busy?"Saving…":"Add line"}</Btn>
       </div>
+      {add.line_type==="part"&&add.part_id&&<div style={{marginTop:8}}><DirectShipNote part={parts.find(x=>x.id===add.part_id)}/></div>}
       <div style={{fontSize:11,marginTop:8,color:saved?C.greenText:C.textMid,fontWeight:saved?700:400}}>{saved||"Pick a part or kit, enter the quantity, then tap Add line. Each line saves when it's added; there's nothing else to save."}</div>
     </div>
   </div>;
