@@ -1,5 +1,5 @@
 // ChlorTainer Inventory System v2.1
-import { useState, useEffect, useRef, useMemo, useId } from "react";
+import { useState, useEffect, useRef, useMemo, useId, Component } from "react";
 import { forecast, FIRM_STATUSES } from "./replenishment.js";
 import BinLabelsTab, { LP_LABEL_SIZES, lpBoxes, printLpLabels } from "./BinLabels.jsx";
 import { parseSlip, guessListType, matchPart } from "./slipParser.js";
@@ -4906,6 +4906,30 @@ async function shrinkImage(file){
 }
 
 // ─── Fabricator screen: only LPs assigned to their company ───────────────────
+// Catches a screen crash: shows the error with a way back instead of a blank page,
+// and records it in the audit log (log_client_error) so it can be diagnosed.
+class ScreenErrorBoundary extends Component {
+  constructor(p){ super(p); this.state={err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err,info){
+    try{ _sb?.rpc("log_client_error",{p_where:this.props.where||"app",p_msg:String(err?.message||err),
+      p_stack:`${err?.stack||""}\n--- component ---${info?.componentStack||""}\n--- ua --- ${navigator.userAgent}`}); }catch(_){ }
+  }
+  render(){
+    if(!this.state.err) return this.props.children;
+    return <div style={{maxWidth:640,margin:"0 auto",padding:20,fontFamily:"system-ui,-apple-system,sans-serif",color:"#1c2b3a"}}>
+      <div style={{fontWeight:900,fontSize:18,marginBottom:10}}>Something went wrong on this screen</div>
+      <div style={{fontSize:14,marginBottom:12}}>It has been reported to TGO. Tap below to go back to your shipments.</div>
+      <pre style={{whiteSpace:"pre-wrap",fontSize:12,background:"#fff0f2",color:"#b00020",padding:10,borderRadius:8,border:"1px solid #f5a0ae"}}>{String(this.state.err?.message||this.state.err)}</pre>
+      <button onClick={()=>{ this.setState({err:null}); this.props.onReset?.(); }} style={{width:"100%",minHeight:48,borderRadius:10,border:"none",background:"#1c2b3a",color:"#fff",fontSize:16,fontWeight:800,marginTop:8}}>← Back to shipments</button>
+    </div>;
+  }
+}
+function FabricatorAppSafe(props){
+  const [k,setK]=useState(0);
+  return <ScreenErrorBoundary where="fabricator" onReset={()=>setK(x=>x+1)}><FabricatorApp key={k} {...props}/></ScreenErrorBoundary>;
+}
+
 function FabricatorApp({ user, onSignOut }) {
   const [list,setList]=useState(null);
   const [openId,setOpenId]=useState(null);
@@ -5185,6 +5209,6 @@ function SupabaseLoader({ config, user, setUser, onDisconnect }) {
   if (err) return <div style={{padding:40,textAlign:"center",color:C.red}}>❌ Failed to connect: {err}<br/><button onClick={onDisconnect} style={{marginTop:16,padding:"8px 16px",cursor:"pointer"}}>Reconnect</button></div>;
   if (!ready) return <Spinner text="Connecting to Supabase…"/>;
   if (!user) return <LoginScreen onLogin={u=>{ setCurrentUser(u); setUser(u); }}/>;
-  if (user?.app_metadata?.role==="fabricator") return <FabricatorApp user={user} onSignOut={handleSignOut}/>;
+  if (user?.app_metadata?.role==="fabricator") return <FabricatorAppSafe user={user} onSignOut={handleSignOut}/>;
   return <MainApp user={user} onSignOut={handleSignOut}/>;
 }
