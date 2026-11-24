@@ -664,19 +664,25 @@ function useData() {
       city:form.city, state:form.state, zip:form.zip
     }).select().single();
     if(error) throw new Error(error.message);
+    // customers isn't in the realtime publication, so update the list here
+    setCustomers(prev=>[...prev.filter(c=>c.id!==data.id),data].sort((a,b)=>a.name.localeCompare(b.name)));
     await logAudit("customer_add","customer",data.id,{name:form.name});
     return data;
   }
   async function updateCustomer(id,form){
-    await _sb.from("customers").update({
+    const {data,error} = await _sb.from("customers").update({
       name:form.name, contact:form.contact, phone:form.phone, email:form.email,
       address_line1:form.address_line1, address_line2:form.address_line2,
       city:form.city, state:form.state, zip:form.zip
-    }).eq("id",id);
+    }).eq("id",id).select().single();
+    if(error) throw new Error(error.message);
+    setCustomers(prev=>prev.map(c=>c.id===id?data:c).sort((a,b)=>a.name.localeCompare(b.name)));
     await logAudit("customer_edit","customer",id,{name:form.name});
   }
   async function deleteCustomer(id){
-    await _sb.from("customers").delete().eq("id",id);
+    const {error} = await _sb.from("customers").delete().eq("id",id);
+    if(error) throw new Error(error.message);
+    setCustomers(prev=>prev.filter(c=>c.id!==id));
     await logAudit("customer_delete","customer",id,{});
   }
 
