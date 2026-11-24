@@ -498,6 +498,30 @@ function useData() {
     const items=[...map.values()].sort((a,b)=>order_of(a.list)-order_of(b.list)||a.seq-b.seq).map(({seq,...it})=>it);
     return {items,skipped,fromPacking:pl.length>0};
   }
+  // Compare an LP with its order's current lines (the LP copies them only when it's created).
+  // Lines match on packing list + part. Picked lines are never dropped, and a qty never goes below what's picked.
+  function lpOrderDiff(lp,items){
+    const order=orders.find(o=>o.id===lp?.order_id);
+    if(!order) return null;
+    const want=buildOrderLpItems(order).items;
+    const key=it=>`${it.list||""}|${it.partId}`;
+    const cur=items||[];
+    const added=[],changed=[],removed=[],keptPicked=[];
+    const next=[];
+    cur.forEach(it=>{
+      const w=want.find(x=>key(x)===key(it));
+      const picked=+it.picked||0;
+      if(w){
+        const q=Math.max(w.qty,picked);
+        if(q!==it.qty) changed.push({partId:it.partId,from:it.qty,to:q});
+        next.push({...it,qty:q});
+      } else if(picked>0){ keptPicked.push({partId:it.partId,picked}); next.push(it); }
+      else removed.push({partId:it.partId,qty:it.qty});
+    });
+    want.forEach(w=>{ if(!cur.some(it=>key(it)===key(w))){ added.push({partId:w.partId,qty:w.qty,direct:w.source==="direct"}); next.push(w); } });
+    return {next,added,changed,removed,keptPicked,changes:added.length+changed.length+removed.length};
+  }
+
   async function createLpFromOrder(orderId){
     const order=orders.find(o=>o.id===orderId);
     if(!order) throw new Error("Order not found.");
@@ -894,7 +918,7 @@ function useData() {
     loading,error,actions:{savePackingList,deletePackingList,addPart,updateStock,adjustSupplierStock,countStock,addSupplier,linkSupplier,unlinkSupplier,createLP,createLpFromOrder,updateLPStatus,updateLP,pickLpItem,unpickLpItem,addMfgBarcode,deleteMfgBarcode,uploadPartImage,removePartImage,setPartActive,addPackingSlipType,addCustomer,updateCustomer,deleteCustomer,
       saveVesselModel,deleteVesselModel,saveControlLine,deleteControlLine,importControlLists,saveKit,deleteKit,saveKitLine,deleteKitLine,updateListType,
       createOrder,updateOrder,deleteOrder,addOrderLine,updateOrderLine,deleteOrderLine,addMaintLine,updateMaintLine,deleteMaintLine,
-      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo,queueItemLabels,updateLabelQueue,removeLabelQueue}};
+      saveProcurement,createPurchaseOrder,updatePurchaseOrder,deletePurchaseOrder,receivePoLine,receiveWithoutPo,lpOrderDiff,queueItemLabels,updateLabelQueue,removeLabelQueue}};
 }
 
 // ─── Camera Scanner ───────────────────────────────────────────────────────────
@@ -2848,6 +2872,20 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
     return persist({items:itemsRef.current},{items_edit:true});
   }
   async function close(){ await flushItems(); onClose(); }
+  // The LP copies the order's lines when it's created; this pulls in later order changes.
+  const orderDiff=lp.order_id&&actions.lpOrderDiff?actions.lpOrderDiff(lp,items):null;
+  async function syncFromOrder(){
+    if(!(await flushItems())) return;
+    const d=actions.lpOrderDiff(lp,itemsRef.current);
+    if(!d||!d.changes){ alert("This license plate already matches the order."); return; }
+    const L=[...d.added.map(a=>`+ Add ${a.partId} × ${a.qty}${a.direct?" (ships direct)":""}`),
+      ...d.changed.map(c=>`~ ${c.partId}: qty ${c.from} → ${c.to}`),
+      ...d.removed.map(r=>`− Remove ${r.partId} × ${r.qty} (no longer on the order)`),
+      ...d.keptPicked.map(k=>`! Keep ${k.partId}: ${k.picked} already picked (undo the pick to remove it)`)];
+    if(!window.confirm(`Update ${lp.id} from order ${lp.order_id}?\n\n${L.join("\n")}`)) return;
+    itemsRef.current=d.next; setItems(d.next);
+    await persist({items:d.next},{items_edit:true,sync_from_order:lp.order_id});
+  }
   const [newTypeInput,setNewTypeInput]=useState("");
   const [addingType,setAddingType]=useState(false);
 
@@ -2973,6 +3011,13 @@ function LpDetailModal({ fabricators, lp, parts, customers, packingSlipTypes, mf
         </div>
         {lp.order_id&&onOpenOrder&&<button onClick={async()=>{ if(!(await flushItems())) return; onClose(); onOpenOrder(lp.order_id); }}
           style={{border:"1px solid #9DC3E6",background:"#EBF2FA",color:C.navy,borderRadius:6,padding:"6px 12px",fontSize:12,fontWeight:700,cursor:"pointer"}}>📑 Order {lp.order_id} ›</button>}
+        {orderDiff&&isPending&&(orderDiff.changes>0
+          ? <div style={{width:"100%",maxWidth:460,background:C.warnBg,border:`1.5px solid ${C.warnBdr}`,borderRadius:8,padding:"10px 12px",display:"grid",gap:8}}>
+              <div style={{fontSize:13,color:C.warnText}}>⚠ Order {lp.order_id} has changed since this license plate was built:
+                {orderDiff.added.length?` ${orderDiff.added.length} line${orderDiff.added.length!==1?"s":""} to add`:""}{orderDiff.changed.length?` · ${orderDiff.changed.length} qty change${orderDiff.changed.length!==1?"s":""}`:""}{orderDiff.removed.length?` · ${orderDiff.removed.length} to remove`:""}.</div>
+              <Btn variant="navy" style={{justifyContent:"center",minHeight:44}} onClick={syncFromOrder}>🔄 Update from order</Btn>
+            </div>
+          : <div style={{fontSize:11,color:C.greenText}}>✓ Lines match order {lp.order_id}</div>)}
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>printLicensePlate({lp:{...lp,type,status,destination,quote_number:quoteNumber,po_number:poNumber,packing_slip_type:packingSlipType},items,parts,customer,packingSlipTypes,fabricator:(fabricators||[]).find(f=>f.id===(fabricatorId||lp.fabricator_id))})}>🖨️ Print License Plate</Btn>
         <Btn variant="outline" style={{padding:"6px 14px",fontSize:12}} onClick={()=>setLblOpen(o=>!o)}>🏷️ Box Labels {lblOpen?"▲":"▼"}</Btn>
         {lblOpen&&(()=>{
