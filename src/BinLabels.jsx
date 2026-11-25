@@ -14,7 +14,7 @@ export const LABEL_SIZES = {
     w: 2, h: 1, mode: "roll", full: false,
   },
   "avery5163": {
-    name: 'Letter sheet, 4" × 2", 10 per sheet — Avery 5163 / 5523 (laser)',
+    name: 'Letter sheet, 4" × 2", 10 per sheet — Avery 5163 / 8163 / 5523',
     w: 4, h: 2, mode: "sheet", full: true,
     // Avery 5163 geometry
     perPage: 10, cols: 2, top: 0.5, left: 0.15625, colGap: 0.1875,
@@ -31,6 +31,13 @@ export const LABEL_SIZES = {
     w: 2.625, h: 1, mode: "sheet", full: false,
     perPage: 30, cols: 3, top: 0.5, left: 0.1875, colGap: 0.125,
     adjustable: true,
+  },
+  // Avery 8163 (inkjet) / 5163 (laser): same geometry as "avery5163", with printer-scaling correction.
+  "avery8163adj": {
+    name: 'Letter sheet, 4" × 2", 10 per sheet — Avery 8163 / 5163 — ADJUSTED for printer scaling',
+    w: 4, h: 2, mode: "sheet", full: true,
+    perPage: 10, cols: 2, top: 0.5, left: 0.15625, colGap: 0.1875,
+    adjustable: true, defaultCal: { scale: 108.7, dx: 0, dy: -0.15 },
   },
   // ── Item (SKU) labels: stuck on the part or its bag ──
   "item1x05": {
@@ -55,12 +62,15 @@ const kindOf = (size) => size.kind || "bin";
 
 // Default print-scaling correction for "adjustable" sheet presets (measured from a 5160 test sheet:
 // the printer output came out ~96.3% size, centred on the page).
+// Each adjusted stock keeps its own setting (stock.defaultCal overrides this default).
 export const DEFAULT_CAL = { scale: 103.8, dx: 0, dy: 0.05 };
-const cleanCal = (c) => ({
-  scale: Math.max(90, Math.min(110, +c?.scale || DEFAULT_CAL.scale)),
-  dx: Math.max(-0.5, Math.min(0.5, Number.isFinite(+c?.dx) ? +c.dx : DEFAULT_CAL.dx)),
-  dy: Math.max(-0.5, Math.min(0.5, Number.isFinite(+c?.dy) ? +c.dy : DEFAULT_CAL.dy)),
+const num = (v, d) => (v === "" || v == null || !Number.isFinite(+v) ? d : +v);
+const cleanCal = (c, def = DEFAULT_CAL) => ({
+  scale: Math.max(85, Math.min(115, num(c?.scale, def.scale) || def.scale)),
+  dx: Math.max(-1, Math.min(1, num(c?.dx, def.dx))),
+  dy: Math.max(-1, Math.min(1, num(c?.dy, def.dy))),
 });
+const defCal = (size) => size?.defaultCal || DEFAULT_CAL;
 
 // Bin layout order: R1-S1-B01 … R3-S4-Bnn, then floor (FL-nn), then parts with no location.
 // Shelves are numbered from the top (S1 = top shelf).
@@ -142,7 +152,14 @@ function pageDoc(labels, size, skipN, title, labelCss, autoPrint) {
     for (let i = 0; i < cells.length; i += size.perPage) pages.push(cells.slice(i, i + size.perPage));
     // Each label is placed at a fixed position on its sheet (not flowed in a grid),
     // so phones, tablets and desktops all paginate the same way: perPage labels per sheet.
-    const [open, close] = size.adjustable ? ['<div class="inner">', "</div>"] : ["", ""];
+    const ruler = size.test ? (() => {
+      // Ruler down the gap between the first two columns: ticks every 1/2", numbered every inch (1–10).
+      const x = size.left + W + size.colGap / 2 - 0.09;
+      let t = "";
+      for (let i = 2; i <= 20; i++) t += `<i style="top:${i / 2}in;width:${i % 2 ? 0.1 : 0.18}in">${i % 2 ? "" : `<b>${i / 2}</b>`}</i>`;
+      return `<div class="ruler" style="left:${x.toFixed(4)}in;top:0;height:10.5in">${t}</div>`;
+    })() : "";
+    const [open, close] = size.adjustable ? [`<div class="inner">${ruler}`, "</div>"] : ["", ""];
     body = pages.map((pg) => `<div class="sheet">${open}${pg.map((c, j) => c === null ? "" :
       `<div class="cell" style="left:${(size.left + (j % size.cols) * (W + size.colGap)).toFixed(4)}in;top:${(size.top + Math.floor(j / size.cols) * H).toFixed(4)}in">${c}</div>`).join("")}${close}</div>`).join("");
     pageCss = `@page{size:letter;margin:0}
@@ -150,8 +167,12 @@ function pageDoc(labels, size, skipN, title, labelCss, autoPrint) {
       .sheet{position:relative;width:8.5in;height:10.99in;overflow:hidden;page-break-after:always;break-after:page}
       .sheet:last-child{page-break-after:auto;break-after:auto}
       .cell{position:absolute}
-      ${size.adjustable ? (() => { const c = cleanCal(size.cal);
-        return `.sheet>.inner{position:absolute;inset:0;transform-origin:4.25in 5.495in;transform:translate(${c.dx}in,${c.dy}in) scale(${(c.scale / 100).toFixed(4)})}`; })() : ""}
+      ${size.adjustable ? (() => { const c = cleanCal(size.cal, defCal(size));
+        return `.ruler{position:absolute;width:.18in;border-left:1px solid #000}
+        .ruler i{position:absolute;left:0;width:.18in;border-top:1px solid #000}
+        .ruler b{position:absolute;left:.04in;font:700 7pt Arial;transform:translateY(-120%)}
+        .tbox{position:absolute;inset:0;border:1px dashed #000;display:flex;align-items:center;justify-content:center;font:700 14pt Arial;color:#888}
+        .sheet>.inner{position:absolute;inset:0;transform-origin:4.25in 5.495in;transform:translate(${c.dx}in,${c.dy}in) scale(${(c.scale / 100).toFixed(4)})}`; })() : ""}
       @media screen{.sheet{outline:1px dashed #bbb;margin:0 auto 16px;background:#fff}}`;
   } else {
     body = labels.map((l) => `<div class="pg">${l}</div>`).join("");
@@ -219,6 +240,18 @@ function buildDoc(list, size, opts, autoPrint) {
 .item.mini .pid{font-size:6.5pt;letter-spacing:0}
 .item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}`;
   return pageDoc(labels, size.adjustable ? { ...size, cal: opts.cal } : size, opts.skip, title, css, autoPrint);
+}
+
+// Plain-paper alignment test for adjusted sheet stocks: dashed outline of every label (with its number)
+// plus an inch ruler, drawn with the current correction so it shows exactly where labels will print.
+export function printAlignmentTest(sizeKey, cal) {
+  const size = LABEL_SIZES[sizeKey];
+  if (!size || !size.adjustable) return;
+  const labels = Array.from({ length: size.perPage }, (_, i) => `<div class="lbl" style="position:relative"><div class="tbox">${i + 1}</div></div>`);
+  const html = pageDoc(labels, { ...size, cal, test: true }, 0, "Label alignment test", "", true);
+  const w = window.open("", "_blank");
+  if (!w) { alert("Allow pop-ups to print labels."); return; }
+  w.document.open(); w.document.write(html); w.document.close();
 }
 
 // Item labels get a blank margin each side so scanners find the start and end.
@@ -357,8 +390,12 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const [showLoc, setShowLoc] = useState(prefs.showLoc ?? true);
   const [copies, setCopies] = useState(1);
   const [skip, setSkip] = useState(0);
-  const [cal, setCal] = useState(() => cleanCal(prefs.cal));
-  const setCalField = (k) => (e) => setCal((c) => ({ ...c, [k]: e.target.value }));
+  // Printer correction, kept per adjusted stock. (Older saves had a single "cal" for the 5160 option.)
+  const [cals, setCals] = useState(() => ({ ...(prefs.cal ? { avery5160adj: prefs.cal } : {}), ...(prefs.cals || {}) }));
+  const cal = cals[binKey] ?? defCal(LABEL_SIZES[binKey]);
+  const setCal = (c) => setCals((all) => ({ ...all, [binKey]: c }));
+  const setCalField = (k) => (e) => setCal({ ...cal, [k]: e.target.value });
+  const cleanCals = () => Object.fromEntries(Object.entries(cals).filter(([k]) => LABEL_SIZES[k]).map(([k, v]) => [k, cleanCal(v, defCal(LABEL_SIZES[k]))]));
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("");
   const [order, setOrder] = useState(prefs.order || "loc");   // "loc" = bin layout order, "id" = part number
@@ -386,9 +423,9 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const sheets = size.mode === "sheet" ? Math.ceil((list.length + (+skip || 0)) / size.perPage) : 0;
 
   const go = (auto) => {
-    const c = cleanCal(cal);
-    setCal(c);
-    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc, order, cal: c });
+    const c = cleanCal(cal, defCal(size));
+    if (size.adjustable) setCal(c);
+    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc, order, cals: { ...cleanCals(), ...(size.adjustable ? { [sizeKey]: c } : {}) } });
     printBinLabels(list, sizeKey, { showPhoto, showMin, showLoc, skip, cal: c }, auto);
   };
 
@@ -398,7 +435,7 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
     <div>
       <SectionTitle>Print Labels</SectionTitle>
       {actions && <PrintQueue queue={labelQueue} allParts={allParts} actions={actions} itemKey={itemKey}
-        setItemKey={(k) => { setItemKey(k); savePrefs({ kind, sizeKey: binKey, itemKey: k, showPhoto, showMin, showLoc, order, cal: cleanCal(cal) }); }} ui={ui} />}
+        setItemKey={(k) => { setItemKey(k); savePrefs({ kind, sizeKey: binKey, itemKey: k, showPhoto, showMin, showLoc, order, cals: cleanCals() }); }} ui={ui} />}
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         {[["bin", "🗄️ Bin labels", "For shelves and bins"], ["item", "🏷️ Item labels", "Small SKU labels for the parts themselves"]].map(([k, l, d]) =>
           <button key={k} onClick={() => setKind(k)} style={{ flex: 1, textAlign: "left", padding: "10px 14px", borderRadius: 8, cursor: "pointer", minHeight: 52,
@@ -420,12 +457,13 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
           {size.mode === "sheet" && <div style={{ width: 150 }}><Input label="Skip used labels" type="number" min="0" max={size.perPage - 1} value={skip} onChange={(e) => setSkip(e.target.value)} /></div>}
         </div>
         {size.adjustable && <div style={{ border: `1px dashed ${C.border}`, borderRadius: 6, padding: "10px 12px", display: "grid", gap: 8 }}>
-          <div style={{ fontSize: 12, color: C.textMid }}><b>Printer alignment.</b> If rows drift up toward the bottom of the sheet, raise Scale; if they drift down, lower it. Shift moves the whole sheet (in inches, + = right / down). Saved on this device.</div>
+          <div style={{ fontSize: 12, color: C.textMid }}><b>Printer alignment</b> (saved on this device, separately for each stock). Print the <b>alignment test</b> on plain paper and measure from the <b>1</b> to the <b>10</b> mark on the ruler: it should be exactly 9". New Scale = Scale × 9 ÷ measured. Then lay the test over a label sheet against a window and use Shift (inches, + = right / down) to line the dashed boxes up with the labels.</div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-            <div style={{ width: 110 }}><Input label="Scale %" type="number" step="0.1" min="90" max="110" value={cal.scale} onChange={setCalField("scale")} /></div>
-            <div style={{ width: 110 }}><Input label="Shift right (in)" type="number" step="0.01" min="-0.5" max="0.5" value={cal.dx} onChange={setCalField("dx")} /></div>
-            <div style={{ width: 110 }}><Input label="Shift down (in)" type="number" step="0.01" min="-0.5" max="0.5" value={cal.dy} onChange={setCalField("dy")} /></div>
-            <Btn variant="ghost" style={{ padding: "8px 12px", fontSize: 12 }} onClick={() => setCal({ ...DEFAULT_CAL })}>Reset</Btn>
+            <div style={{ width: 110 }}><Input label="Scale %" type="number" step="0.1" min="85" max="115" value={cal.scale} onChange={setCalField("scale")} /></div>
+            <div style={{ width: 110 }}><Input label="Shift right (in)" type="number" step="0.01" min="-1" max="1" value={cal.dx} onChange={setCalField("dx")} /></div>
+            <div style={{ width: 110 }}><Input label="Shift down (in)" type="number" step="0.01" min="-1" max="1" value={cal.dy} onChange={setCalField("dy")} /></div>
+            <Btn variant="ghost" style={{ padding: "8px 12px", fontSize: 12 }} onClick={() => setCal({ ...defCal(size) })}>Reset</Btn>
+            <Btn variant="outline" style={{ padding: "8px 12px", fontSize: 12 }} onClick={() => printAlignmentTest(sizeKey, cleanCal(cal, defCal(size)))}>🎯 Print alignment test</Btn>
           </div>
         </div>}
         <div style={{ fontSize: 12, color: C.textMid }}>
