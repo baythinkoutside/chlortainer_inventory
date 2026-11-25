@@ -24,6 +24,14 @@ export const LABEL_SIZES = {
     w: 2.625, h: 1, mode: "sheet", full: false,
     perPage: 30, cols: 3, top: 0.5, left: 0.1875, colGap: 0.125,
   },
+  // Same Avery 5160 geometry, but the whole sheet is enlarged/shifted to undo a printer that
+  // shrinks the page (rows drift up toward the bottom of the sheet). Tunable on the Bin Labels tab.
+  "avery5160adj": {
+    name: 'Letter sheet, 2.625" × 1", 30 per sheet — Avery 5160 / 8160 — ADJUSTED for printer scaling',
+    w: 2.625, h: 1, mode: "sheet", full: false,
+    perPage: 30, cols: 3, top: 0.5, left: 0.1875, colGap: 0.125,
+    adjustable: true,
+  },
   // ── Item (SKU) labels: stuck on the part or its bag ──
   "item1x05": {
     name: '1" × 0.5" thermal roll — part #, description, barcode (TGO item label)',
@@ -44,6 +52,15 @@ export const LABEL_SIZES = {
   },
 };
 const kindOf = (size) => size.kind || "bin";
+
+// Default print-scaling correction for "adjustable" sheet presets (measured from a 5160 test sheet:
+// the printer output came out ~96.3% size, centred on the page).
+export const DEFAULT_CAL = { scale: 103.8, dx: 0, dy: 0.05 };
+const cleanCal = (c) => ({
+  scale: Math.max(90, Math.min(110, +c?.scale || DEFAULT_CAL.scale)),
+  dx: Math.max(-0.5, Math.min(0.5, Number.isFinite(+c?.dx) ? +c.dx : DEFAULT_CAL.dx)),
+  dy: Math.max(-0.5, Math.min(0.5, Number.isFinite(+c?.dy) ? +c.dy : DEFAULT_CAL.dy)),
+});
 
 // Bin layout order: R1-S1-B01 … R3-S4-Bnn, then floor (FL-nn), then parts with no location.
 // Shelves are numbered from the top (S1 = top shelf).
@@ -125,13 +142,16 @@ function pageDoc(labels, size, skipN, title, labelCss, autoPrint) {
     for (let i = 0; i < cells.length; i += size.perPage) pages.push(cells.slice(i, i + size.perPage));
     // Each label is placed at a fixed position on its sheet (not flowed in a grid),
     // so phones, tablets and desktops all paginate the same way: perPage labels per sheet.
-    body = pages.map((pg) => `<div class="sheet">${pg.map((c, j) => c === null ? "" :
-      `<div class="cell" style="left:${(size.left + (j % size.cols) * (W + size.colGap)).toFixed(4)}in;top:${(size.top + Math.floor(j / size.cols) * H).toFixed(4)}in">${c}</div>`).join("")}</div>`).join("");
+    const [open, close] = size.adjustable ? ['<div class="inner">', "</div>"] : ["", ""];
+    body = pages.map((pg) => `<div class="sheet">${open}${pg.map((c, j) => c === null ? "" :
+      `<div class="cell" style="left:${(size.left + (j % size.cols) * (W + size.colGap)).toFixed(4)}in;top:${(size.top + Math.floor(j / size.cols) * H).toFixed(4)}in">${c}</div>`).join("")}${close}</div>`).join("");
     pageCss = `@page{size:letter;margin:0}
       html,body{width:8.5in}
       .sheet{position:relative;width:8.5in;height:10.99in;overflow:hidden;page-break-after:always;break-after:page}
       .sheet:last-child{page-break-after:auto;break-after:auto}
       .cell{position:absolute}
+      ${size.adjustable ? (() => { const c = cleanCal(size.cal);
+        return `.sheet>.inner{position:absolute;inset:0;transform-origin:4.25in 5.495in;transform:translate(${c.dx}in,${c.dy}in) scale(${(c.scale / 100).toFixed(4)})}`; })() : ""}
       @media screen{.sheet{outline:1px dashed #bbb;margin:0 auto 16px;background:#fff}}`;
   } else {
     body = labels.map((l) => `<div class="pg">${l}</div>`).join("");
@@ -198,7 +218,7 @@ function buildDoc(list, size, opts, autoPrint) {
 .item.mini{padding:.02in .03in .015in;gap:0}
 .item.mini .pid{font-size:6.5pt;letter-spacing:0}
 .item.mini .desc1{font-size:5pt;font-weight:700;text-align:center;line-height:1.15;margin-bottom:.01in}`;
-  return pageDoc(labels, size, opts.skip, title, css, autoPrint);
+  return pageDoc(labels, size.adjustable ? { ...size, cal: opts.cal } : size, opts.skip, title, css, autoPrint);
 }
 
 // Item labels get a blank margin each side so scanners find the start and end.
@@ -337,6 +357,8 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const [showLoc, setShowLoc] = useState(prefs.showLoc ?? true);
   const [copies, setCopies] = useState(1);
   const [skip, setSkip] = useState(0);
+  const [cal, setCal] = useState(() => cleanCal(prefs.cal));
+  const setCalField = (k) => (e) => setCal((c) => ({ ...c, [k]: e.target.value }));
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("");
   const [order, setOrder] = useState(prefs.order || "loc");   // "loc" = bin layout order, "id" = part number
@@ -364,8 +386,10 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const sheets = size.mode === "sheet" ? Math.ceil((list.length + (+skip || 0)) / size.perPage) : 0;
 
   const go = (auto) => {
-    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc, order });
-    printBinLabels(list, sizeKey, { showPhoto, showMin, showLoc, skip }, auto);
+    const c = cleanCal(cal);
+    setCal(c);
+    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc, order, cal: c });
+    printBinLabels(list, sizeKey, { showPhoto, showMin, showLoc, skip, cal: c }, auto);
   };
 
   const chk = { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: C.textDark, cursor: "pointer" };
@@ -374,7 +398,7 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
     <div>
       <SectionTitle>Print Labels</SectionTitle>
       {actions && <PrintQueue queue={labelQueue} allParts={allParts} actions={actions} itemKey={itemKey}
-        setItemKey={(k) => { setItemKey(k); savePrefs({ kind, sizeKey: binKey, itemKey: k, showPhoto, showMin, showLoc }); }} ui={ui} />}
+        setItemKey={(k) => { setItemKey(k); savePrefs({ kind, sizeKey: binKey, itemKey: k, showPhoto, showMin, showLoc, order, cal: cleanCal(cal) }); }} ui={ui} />}
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         {[["bin", "🗄️ Bin labels", "For shelves and bins"], ["item", "🏷️ Item labels", "Small SKU labels for the parts themselves"]].map(([k, l, d]) =>
           <button key={k} onClick={() => setKind(k)} style={{ flex: 1, textAlign: "left", padding: "10px 14px", borderRadius: 8, cursor: "pointer", minHeight: 52,
@@ -395,6 +419,15 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
           {!(kind === "item" && perUnit) && <div style={{ width: 110 }}><Input label="Copies each" type="number" min="1" max={kind === "item" ? 500 : 50} value={copies} onChange={(e) => setCopies(e.target.value)} /></div>}
           {size.mode === "sheet" && <div style={{ width: 150 }}><Input label="Skip used labels" type="number" min="0" max={size.perPage - 1} value={skip} onChange={(e) => setSkip(e.target.value)} /></div>}
         </div>
+        {size.adjustable && <div style={{ border: `1px dashed ${C.border}`, borderRadius: 6, padding: "10px 12px", display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, color: C.textMid }}><b>Printer alignment.</b> If rows drift up toward the bottom of the sheet, raise Scale; if they drift down, lower it. Shift moves the whole sheet (in inches, + = right / down). Saved on this device.</div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div style={{ width: 110 }}><Input label="Scale %" type="number" step="0.1" min="90" max="110" value={cal.scale} onChange={setCalField("scale")} /></div>
+            <div style={{ width: 110 }}><Input label="Shift right (in)" type="number" step="0.01" min="-0.5" max="0.5" value={cal.dx} onChange={setCalField("dx")} /></div>
+            <div style={{ width: 110 }}><Input label="Shift down (in)" type="number" step="0.01" min="-0.5" max="0.5" value={cal.dy} onChange={setCalField("dy")} /></div>
+            <Btn variant="ghost" style={{ padding: "8px 12px", fontSize: 12 }} onClick={() => setCal({ ...DEFAULT_CAL })}>Reset</Btn>
+          </div>
+        </div>}
         <div style={{ fontSize: 12, color: C.textMid }}>
           {size.mode === "roll"
             ? <>Print with the label printer selected, paper size <b>{size.w}" × {size.h}"</b>, scale <b>100%</b> / "Actual size", margins <b>None</b>, headers &amp; footers <b>off</b>.</>
