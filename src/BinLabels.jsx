@@ -45,6 +45,22 @@ export const LABEL_SIZES = {
 };
 const kindOf = (size) => size.kind || "bin";
 
+// Bin layout order: R1-S1-B01 … R3-S4-Bnn, then floor (FL-nn), then parts with no location.
+// Shelves are numbered from the top (S1 = top shelf).
+export function locKey(loc) {
+  const s = String(loc || "").trim().toUpperCase();
+  let m = s.match(/^R(\d+)-S(\d+)-B(\d+)$/);
+  if (m) return [0, +m[1], +m[2], +m[3], s];
+  m = s.match(/^FL-?(\d+)$/);
+  if (m) return [1, 0, 0, +m[1], s];
+  return s ? [2, 0, 0, 0, s] : [3, 0, 0, 0, ""];
+}
+const byLoc = (a, b) => { const x = locKey(a.location), y = locKey(b.location);
+  for (let i = 0; i < 4; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return x[4].localeCompare(y[4]) || a.id.localeCompare(b.id, undefined, { numeric: true }); };
+const zoneOf = (loc) => { const k = locKey(loc); return k[0] === 0 ? `R${k[1]}` : k[0] === 1 ? "FL" : k[0] === 2 ? "other" : "none"; };
+const ZONES = [["", "All"], ["R1", "Rack 1 · Common"], ["R2", "Rack 2 · Ton / Double Ton"], ["R3", "Rack 3 · 150"], ["FL", "Floor"], ["none", "No location"]];
+
 const PREF_KEY = "chlortainer_binlabel_prefs_v2";
 function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch { return {}; }
@@ -70,7 +86,7 @@ function labelHtml(p, size, opts) {
   const meta = [`UOM: ${esc(p.uom || "EA")}`];
   if (opts.showMin && +p.minStock > 0) meta.push(`Min: ${+p.minStock}`);
   if (p.legacy_part_no) meta.push(`Old #${esc(p.legacy_part_no)}`);
-  if (opts.showLoc && p.location) meta.push(`<b class="loc">Bin ${esc(p.location)}</b>`);
+  if (opts.showLoc && p.location) meta.push(`<b class="loc">${/^FL/i.test(p.location) ? "Floor" : "Bin"} ${esc(p.location)}</b>`);
 
   if (!size.full) {
     return `<div class="lbl compact">
@@ -323,12 +339,16 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const [skip, setSkip] = useState(0);
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("");
+  const [order, setOrder] = useState(prefs.order || "loc");   // "loc" = bin layout order, "id" = part number
+  const [zone, setZone] = useState("");
   const [sel, setSel] = useState(() => new Set());
 
   const size = LABEL_SIZES[sizeKey];
-  const sorted = useMemo(() => [...parts].sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })), [parts]);
+  const sorted = useMemo(() => [...parts].sort(order === "loc" ? byLoc : (a, b) => a.id.localeCompare(b.id, undefined, { numeric: true })), [parts, order]);
+  const zoneCount = useMemo(() => { const c = {}; parts.forEach((p) => { const z = zoneOf(p.location); c[z] = (c[z] || 0) + 1; }); return c; }, [parts]);
   const cats = useMemo(() => [...new Set(parts.map((p) => p.category).filter(Boolean))].sort(), [parts]);
   const shown = sorted.filter((p) =>
+    (!zone || zoneOf(p.location) === zone) &&
     (!cat || p.category === cat) &&
     (!q || `${p.id} ${p.new_part_no || ""} ${p.legacy_part_no || ""} ${p.description}`.toLowerCase().includes(q.toLowerCase())));
 
@@ -344,7 +364,7 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
   const sheets = size.mode === "sheet" ? Math.ceil((list.length + (+skip || 0)) / size.perPage) : 0;
 
   const go = (auto) => {
-    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc });
+    savePrefs({ kind, sizeKey: binKey, itemKey, showPhoto, showMin, showLoc, order });
     printBinLabels(list, sizeKey, { showPhoto, showMin, showLoc, skip }, auto);
   };
 
@@ -387,7 +407,17 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
         </div>
       </div>
 
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+        {ZONES.filter(([z]) => !z || zoneCount[z]).map(([z, l]) => (
+          <button key={z || "all"} onClick={() => setZone(z)} style={{ padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 700, cursor: "pointer", minHeight: 34,
+            border: `1.5px solid ${zone === z ? C.navy : C.border}`, background: zone === z ? C.navy : C.white, color: zone === z ? "#fff" : C.navy }}>
+            {l}{z ? ` (${zoneCount[z]})` : ""}</button>))}
+      </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10, alignItems: "flex-end" }}>
+        <Sel value={order} onChange={(e) => setOrder(e.target.value)}>
+          <option value="loc">Order: bin layout (rack, shelf, bin)</option>
+          <option value="id">Order: part number</option>
+        </Sel>
         <div style={{ flex: "1 1 220px" }}><Input placeholder="Search part # or description…" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%" }} /></div>
         {cats.length > 0 && <Sel value={cat} onChange={(e) => setCat(e.target.value)}>
           <option value="">All categories</option>
@@ -404,7 +434,8 @@ export default function BinLabelsTab({ parts, allParts = parts, labelQueue = [],
             {p.image_url
               ? <img src={p.image_url} alt="" style={{ width: 36, height: 36, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} />
               : <div style={{ width: 36, height: 36, borderRadius: 4, background: C.offWhite, border: `1px dashed ${C.border}` }} />}
-            <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.amber, fontSize: 12, minWidth: 104 }}>{p.id}</span>
+            <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.navy, fontSize: 12, minWidth: 92 }}>{p.location || "—"}</span>
+            <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.amber, fontSize: 12, minWidth: 74 }}>{p.id}</span>
             <span style={{ fontSize: 13, color: C.textDark, flex: 1 }}>{p.description}</span>
             <span style={{ fontSize: 11, color: C.textLight }}>{kind === "item" ? `${p.stock ?? 0} ${p.uom || "EA"} on hand` : `${p.uom}${+p.minStock > 0 ? ` · Min ${p.minStock}` : ""}`}</span>
           </label>
